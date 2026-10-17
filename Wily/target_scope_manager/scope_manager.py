@@ -48,14 +48,28 @@ def _parse_hostname(value: str, *, target: bool = False) -> str:
 
     hostname = parsed.hostname.rstrip(".").lower()
 
-    # This version accepts domain names, not literal IP addresses.
+    # Reject standard IP literals without inspecting exception text.
     try:
         ipaddress.ip_address(hostname)
+    except ValueError:
+        pass
+    else:
         raise ScopeError("IP addresses are not accepted as domain targets.")
-    except ValueError as exc:
-        if str(exc).startswith("IP addresses"):
-            raise
-        # ValueError here means the input is not a literal IP address.
+
+    # Reject legacy numeric IP representations.
+    def is_numeric_component(label: str) -> bool:
+        label = label.lower()
+        if label.isdigit():
+            return True
+        return (
+            label.startswith("0x")
+            and len(label) > 2
+            and all(char in "0123456789abcdef" for char in label[2:])
+        )
+
+    labels = hostname.split(".")
+    if labels and all(is_numeric_component(label) for label in labels):
+        raise ScopeError("Numeric IP-style hostnames are not accepted.")
 
     if hostname == "localhost" or hostname.endswith(".localhost"):
         raise ScopeError("Localhost is not accepted as a domain target.")
@@ -75,7 +89,10 @@ def _parse_hostname(value: str, *, target: bool = False) -> str:
         if (
             not label
             or len(label) > 63
-            or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label)
+            # Underscore allowed: real DNS labels like _dmarc, _acme-challenge,
+            # _sip._tcp (TXT/SRV-style records) are legal and common - a recon
+            # tool that drops these as "invalid" silently loses real subdomains.
+            or not re.fullmatch(r"[a-z0-9_](?:[a-z0-9_-]*[a-z0-9_])?", label)
         ):
             raise ScopeError(f"Invalid domain label: {label!r}")
 
@@ -94,7 +111,7 @@ class ScopeManager:
         self,
         target: str,
         *,
-        allow_subdomains: bool = True,
+        allow_subdomains: bool = False,
         excluded_hosts: tuple[str, ...] = (),
     ) -> None:
         self.target = normalize_domain(target)

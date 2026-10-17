@@ -1,0 +1,11 @@
+# Python generated files
+__pycache__/
+*.py[cod]
+
+# Local environment and secrets
+.venv/
+venv/
+.env
+
+# Local Wily scan configuration
+Wily/scope.json
