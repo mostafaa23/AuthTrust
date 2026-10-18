@@ -9,3 +9,9 @@ venv/
 
 # Local Wily scan configuration
 Wily/scope.json
+
+# Python generated files
+*.egg-info/
+.venv/
+__pycache__/
+*.py[cod]
