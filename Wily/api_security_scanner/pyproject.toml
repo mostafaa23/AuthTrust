@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wily"
+version = "0.1.0"
+description = "Wily - cloud-native, black-box API security scanner (academic project)"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "aiohttp>=3.9",
+]
+
+[project.optional-dependencies]
+# Needed only for Stage 4 (wily/traffic_monitor.py). Kept optional so
+# `pip install wily` alone (no browser, no 300MB Chromium download) is
+# enough to run Stages 0-3.
+traffic = ["playwright>=1.40"]
+# Needed only if a spec is a YAML OpenAPI file instead of JSON.
+spec-yaml = ["PyYAML>=6.0"]
+
+[project.scripts]
+# This is the part that matters: after `pip install .` (or `pip install -e .`
+# for local dev), `wily` is a normal command on PATH - no `python -m`, no
+# activating anything extra, same experience as `nuclei` or `bola` after
+# `go install .../cmd/wily@latest`.
+wily = "wily.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["wily*"]
+
+[tool.setuptools.package-data]
+wily = ["wordlists/*.txt"]

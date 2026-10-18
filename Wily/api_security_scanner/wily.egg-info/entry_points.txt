@@ -1,0 +1,2 @@
+[console_scripts]
+wily = wily.cli:main

@@ -1,0 +1,7 @@
+aiohttp>=3.9
+
+[spec-yaml]
+PyYAML>=6.0
+
+[traffic]
+playwright>=1.40
