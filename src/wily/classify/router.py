@@ -26,9 +26,30 @@ class DiscoveredAsset:
     discovery_source: str  # recon | javascript | openapi | proxy | wordlist | scanner
 
 
-def route_asset(asset: DiscoveredAsset) -> list[str]:
-    """Return the names of the scanners appropriate for this asset.
+# Which scanners each asset type should be routed to for its initial
+# (always-on, relatively cheap) detection pass. Deeper/aggressive tests are
+# not listed here - they are triggered from findings by risk.triggers, so a
+# scan stays finding-driven instead of running every module on every asset.
+#
+# Scanner names match each scanner class's ``name`` attribute. Names for
+# scanners not built yet (e.g. "s3_bucket") are included so the routing table
+# is the single place that declares intent; the orchestrator simply skips a
+# routed scanner it doesn't have wired yet.
+_ROUTES: dict[AssetType, list[str]] = {
+    AssetType.API_ENDPOINT: ["authz_bypass", "cors_misconfig"],
+    AssetType.VERSIONED_SERVICE: ["authz_bypass", "cors_misconfig"],
+    AssetType.CLOUD_STORAGE: ["s3_bucket"],
+    AssetType.JS_FILE: [],  # mined for endpoints during discovery, not scanned directly
+    AssetType.TLS_SERVICE: [],
+}
 
-    TODO: the actual routing logic, keyed on asset_type.
+
+def route_asset(asset: DiscoveredAsset) -> list[str]:
+    """Return the scanner names for this asset's initial detection pass.
+
+    Keyed on ``asset_type`` so routing is data-driven in one place instead of
+    hardcoded in the orchestrator. An unknown asset type routes to nothing
+    (empty list) rather than raising, so a new, unclassified asset can never
+    abort a scan.
     """
-    raise NotImplementedError
+    return list(_ROUTES.get(asset.asset_type, []))

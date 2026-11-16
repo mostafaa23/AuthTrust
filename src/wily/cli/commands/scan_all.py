@@ -48,6 +48,7 @@ from wily.recon.traffic_import import ImportedTraffic, import_traffic
 from wily.report.json_report import export_json
 from wily.risk.rules_engine import apply_deterministic_rules
 from wily.risk.scoring import compute_risk_score
+from wily.risk.triggers import TriggerContext, derive_followups
 from wily.scanners.authz_bypass import (
     AuthzBypassScanner,
     AuthzBypassTarget,
@@ -234,6 +235,10 @@ async def run_full_scan(
     if canary:
         console.print(f"[cyan][*][/cyan] OOB canary running locally: {canary.base_url}")
 
+    # Track which (scanner, asset) pairs the broad detection pass already ran,
+    # so the finding-driven follow-up step below never re-runs the same test.
+    scanned: set[tuple[str, str]] = set()
+
     try:
         for ep_url in endpoints:
             console.print(f"[cyan]  ->[/cyan] {ep_url}")
@@ -255,6 +260,8 @@ async def run_full_scan(
                     CorsMisconfigScanner(scope_manager=scope, http_engine=http_engine),
                     CorsMisconfigTarget(url=ep_url),
                 )
+                scanned.add(("authz_bypass", ep_url))
+                scanned.add(("cors_misconfig", ep_url))
             except ScannerConfirmationError as e:
                 console.print(f"[yellow]    [!][/yellow] Auth Bypass skipped: {e}")
             except Exception as e:
@@ -289,6 +296,7 @@ async def run_full_scan(
                         confirm_owned_infra=confirm_owned_infra,
                     )
                     all_findings += await run_scanner(ssrf_scanner, ssrf_target)
+                    scanned.add(("ssrf_imds", ep_url))
             except ScannerConfirmationError as e:
                 console.print(f"[yellow]    [!][/yellow] SSRF skipped: {e}")
             except Exception as e:
@@ -301,6 +309,7 @@ async def run_full_scan(
                         JwtTamperScanner(scope_manager=scope, http_engine=http_engine),
                         jwt_target,
                     )
+                    scanned.add(("jwt_tamper", ep_url))
                 except Exception as e:
                     console.print(f"[yellow]    [!][/yellow] JWT check failed: {e}")
     finally:
@@ -319,6 +328,37 @@ async def run_full_scan(
             "[yellow][!][/yellow] BOLA requires at least two --identity values "
             "(one identity alone can't be compared) - skipped."
         )
+
+    # --- Finding-driven follow-ups: run (or recommend) only the deeper tests
+    # the detection pass actually justified - see risk/triggers.py. The broad
+    # pass above already covered its own (scanner, asset) pairs, so follow-ups
+    # that duplicate it are skipped; the value grows as later phases add
+    # scanners (S3, API-keys) whose findings trigger new deep tests. ---
+    context = TriggerContext(
+        has_token=bool(token),
+        has_identities=len(identities) >= 2,
+        has_canary=False,  # the OOB canary is already stopped here; blind escalation is advised, not auto-run
+        has_iam_file=bool(iam_file),
+    )
+    followups = derive_followups(all_findings, context)
+    pending = [fu for fu in followups if (fu.scanner, fu.asset) not in scanned]
+    if pending:
+        console.print(f"\n[cyan][*][/cyan] Finding-driven follow-ups: {len(pending)}")
+        for fu in pending:
+            if fu.scanner == "jwt_tamper" and token:
+                try:
+                    all_findings += await run_scanner(
+                        JwtTamperScanner(scope_manager=scope, http_engine=http_engine),
+                        JwtTarget(url=fu.asset, sample_token=token),
+                    )
+                    scanned.add((fu.scanner, fu.asset))
+                    console.print(f"[cyan]    [>][/cyan] ran {fu.scanner} on {fu.asset} — {fu.reason}")
+                except Exception as e:
+                    console.print(f"[yellow]    [!][/yellow] follow-up {fu.scanner} failed: {e}")
+            else:
+                # No standalone target available to auto-run this one here;
+                # surface it as a justified next step for the analyst.
+                console.print(f"[cyan]    [>][/cyan] recommend {fu.scanner} on {fu.asset} — {fu.reason}")
 
     _finish(all_findings, output, show_leak)
 
