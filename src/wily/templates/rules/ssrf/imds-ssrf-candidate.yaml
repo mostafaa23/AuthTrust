@@ -1,0 +1,36 @@
+id: cloud-ssrf-imds-candidate
+info:
+  name: "Candidate SSRF parameter pointing to cloud metadata"
+  severity: high
+  category: cloud-ssrf
+  description: >
+    Probes candidate parameters (url=, callback=, webhook=, ...) by
+    sending a canary URL instead of targeting 169.254.169.254 directly,
+    which reduces the risk of accidentally hitting infrastructure the
+    user doesn't actually own.
+
+asset-type: http-endpoint-with-param
+
+authorization:
+  mode: passive
+  requires-tenant-pair: false
+  requires-owned-infra: true   # the active IMDSv1 step needs this condition
+
+request:
+  - method: GET
+    path: "{{BaseURL}}?url={{CANARY_URL}}"
+
+matchers-condition: and
+matchers:
+  - type: dsl
+    # TODO: actually wire this field to a callback result from interactsh or similar
+    # dsl: ["canary_hit == true"]
+
+evidence:
+  - callback_log
+  - response_time_delta
+
+remediation: >
+  Restrict the server's outbound requests (egress filtering), enforce
+  IMDSv2 only (hop-limit=1), and use an explicit allow-list of domains
+  the application is permitted to connect to.
