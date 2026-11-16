@@ -36,6 +36,7 @@ from pathlib import Path
 
 import networkx as nx
 
+from wily.core.scope_manager import account_in_scope
 from wily.scanners.base import Finding
 
 # --- IAM Self-Mutation: the first 8 of Rhino Security Labs' 21 methods ---
@@ -236,6 +237,33 @@ def load_authorization_details(path: Path) -> list[Principal]:
         )
 
     return principals
+
+
+def filter_principals_in_scope(
+    principals: list[Principal], scope
+) -> list[Principal]:
+    """Drop principals whose AWS account is outside the configured scope.
+
+    ``scope`` may be a :class:`~wily.core.scope_manager.ScopeManager` (anything
+    exposing ``is_account_in_scope``) or a plain iterable of account ids / ARN
+    prefixes. The IAM analyzer makes no HTTP requests, so this is the guard
+    that keeps it from reasoning about a *third-party* account that happened to
+    appear in an exported ``get-account-authorization-details`` file. With no
+    account scope configured (the common case - the user exported their own
+    account) nothing is filtered out.
+    """
+    check = getattr(scope, "is_account_in_scope", None)
+    if check is None:
+        accounts = tuple(scope or ())
+        if not accounts:
+            return principals
+
+        def check(arn: str) -> bool:
+            return account_in_scope(arn, accounts)
+    elif not getattr(scope, "has_account_scope", True):
+        return principals
+    return [p for p in principals if check(p.arn)]
+
 
 # ---------------------------------------------------------------------------
 # Permission Graph Engine

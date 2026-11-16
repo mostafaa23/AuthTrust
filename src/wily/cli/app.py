@@ -79,11 +79,44 @@ def scan_command(
             "redacts secrets."
         ),
     ),
+    burp_xml: str = typer.Option(
+        None, "--burp-xml",
+        help=(
+            "Import a Burp Suite 'Save items' XML export instead of (or alongside) "
+            "live discovery. Endpoints/tokens/S3 links are parsed offline and the "
+            "in-scope endpoints are fed into the scan queue."
+        ),
+    ),
+    import_har: str = typer.Option(
+        None, "--import-har",
+        help=(
+            "Import a HAR capture (browser/DevTools). Same offline parse as "
+            "--burp-xml: endpoints, bearer tokens and S3 links are extracted."
+        ),
+    ),
+    scope_bucket: list[str] = typer.Option(
+        None, "--scope-bucket",
+        help="S3 bucket name or glob pattern in scope (e.g. 'target-*'). Repeatable.",
+    ),
+    scope_account: list[str] = typer.Option(
+        None, "--scope-account",
+        help=(
+            "AWS account id or ARN prefix in scope (e.g. 123456789012 or "
+            "'arn:aws:iam::123456789012:*'). Restricts IAM analysis. Repeatable."
+        ),
+    ),
+    scope_config: str = typer.Option(
+        None, "--scope-config",
+        help="JSON/YAML file with 'buckets', 'accounts' and 'exclude' scope lists.",
+    ),
 ) -> None:
     """The full bundle, automatically (Discovery + Auth Bypass + CORS + SSRF)
     against any domain, enabling JWT/BOLA/IAM based on the inputs you provide."""
-    if not domain and not iam_file:
-        typer.echo("You must provide a domain or --iam-file at minimum. Try: wily scan --help")
+    if not domain and not iam_file and not burp_xml and not import_har:
+        typer.echo(
+            "You must provide a domain, --iam-file, --burp-xml or --import-har at "
+            "minimum. Try: wily scan --help"
+        )
         raise typer.Exit(code=1)
 
     asyncio.run(
@@ -98,6 +131,11 @@ def scan_command(
             confirm_destructive=confirm_destructive,
             confirm_owned_infra=confirm_owned_infra,
             show_leak=show_leak,
+            burp_xml=burp_xml,
+            import_har=import_har,
+            scope_buckets=scope_bucket or [],
+            scope_accounts=scope_account or [],
+            scope_config=scope_config,
         )
     )
 

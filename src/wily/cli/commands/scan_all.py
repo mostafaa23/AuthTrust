@@ -33,13 +33,18 @@ from rich.table import Table
 
 from wily.core.oob_canary import OOBCanaryServer
 from wily.core.rate_limiter import AdaptiveRateLimiter
-from wily.core.scope_manager import ScopeManager
-from wily.recon.api_discovery import ApiDiscoveryPipeline, DiscoveryConfig
+from wily.core.scope_manager import ScopeError, ScopeManager, load_scope_config
+from wily.recon.api_discovery import (
+    ApiDiscoveryPipeline,
+    DiscoveryConfig,
+    DiscoveryReport,
+)
 from wily.recon.parameter_discovery import (
     ParameterDiscoveryConfig,
     discover_parameters,
     select_ssrf_candidates,
 )
+from wily.recon.traffic_import import ImportedTraffic, import_traffic
 from wily.report.json_report import export_json
 from wily.risk.rules_engine import apply_deterministic_rules
 from wily.risk.scoring import compute_risk_score
@@ -54,6 +59,7 @@ from wily.scanners.bola import BolaTester, Identity
 from wily.scanners.http_engine import HttpEngine
 from wily.scanners.iam_privesc import (
     build_privesc_graph,
+    filter_principals_in_scope,
     find_privesc_paths,
     load_authorization_details,
 )
@@ -74,13 +80,59 @@ async def run_full_scan(
     confirm_destructive: bool = True,
     confirm_owned_infra: bool = True,
     show_leak: bool = False,
+    burp_xml: str | None = None,
+    import_har: str | None = None,
+    scope_buckets: list[str] | None = None,
+    scope_accounts: list[str] | None = None,
+    scope_config: str | None = None,
 ) -> None:
     all_findings: list = []
+
+    # --- Resolve the extended scope (buckets + AWS accounts) from CLI/config.
+    buckets: tuple[str, ...] = tuple(scope_buckets or ())
+    accounts: tuple[str, ...] = tuple(scope_accounts or ())
+    excluded: tuple[str, ...] = ()
+    if scope_config:
+        try:
+            cfg = load_scope_config(scope_config)
+            buckets += cfg["buckets"]
+            accounts += cfg["accounts"]
+            excluded += cfg["exclude"]
+        except (ScopeError, OSError) as e:
+            console.print(f"[yellow][!][/yellow] Scope config ignored: {e}")
+    if buckets:
+        console.print(f"[cyan][*][/cyan] S3 bucket scope: {', '.join(buckets)}")
+    if accounts:
+        console.print(f"[cyan][*][/cyan] AWS account scope: {', '.join(accounts)}")
+
+    # --- Hybrid input: parse any imported traffic (offline - no replay).
+    imported: ImportedTraffic | None = None
+    if burp_xml or import_har:
+        imported = import_traffic(burp_xml=burp_xml, har=import_har)
+        console.print(
+            f"[cyan][*][/cyan] Imported traffic: {len(imported.endpoints)} endpoint(s), "
+            f"{len(imported.tokens)} token(s), {len(imported.s3_links)} S3 link(s)."
+        )
+        for err in imported.errors:
+            console.print(f"[yellow][!][/yellow] Traffic import: {err}")
+        # Seed the JWT --token path from an observed bearer token when the user
+        # did not supply one explicitly.
+        if not token and imported.jwt_tokens:
+            token = imported.jwt_tokens[0]
+            console.print("[cyan][*][/cyan] JWT: seeded --token from imported bearer token.")
 
     if iam_file:
         console.print(f"[cyan][*][/cyan] IAM: analyzing {iam_file} ...")
         try:
             principals = load_authorization_details(Path(iam_file))
+            if accounts:
+                before = len(principals)
+                principals = filter_principals_in_scope(principals, accounts)
+                if len(principals) < before:
+                    console.print(
+                        f"[cyan][*][/cyan] IAM: {before - len(principals)} principal(s) "
+                        "dropped as out-of-account-scope."
+                    )
             graph = build_privesc_graph(principals)
             iam_findings = find_privesc_paths(graph, principals)
             all_findings += iam_findings
@@ -90,6 +142,19 @@ async def run_full_scan(
             # bad JSON) must not abort the whole scan - skip IAM and continue
             # with the rest of the modules.
             console.print(f"[yellow][!][/yellow] IAM analysis skipped: {e}")
+
+    # When no domain was supplied but imported traffic carried endpoints, adopt
+    # the first imported endpoint's host as the scan target so those endpoints
+    # can be scanned. Active discovery is skipped in that case (the tester chose
+    # import mode, not "go probe this live target").
+    user_supplied_domain = bool(domain)
+    if not domain and imported and imported.endpoints:
+        first_host = urlparse(imported.endpoints[0]).hostname
+        if first_host:
+            domain = first_host
+            console.print(
+                f"[cyan][*][/cyan] No domain given; scoping to imported host [bold]{first_host}[/bold]."
+            )
 
     if not domain:
         _finish(all_findings, output, show_leak)
@@ -107,26 +172,58 @@ async def run_full_scan(
     # scan: every scanner below shares them, so the AdaptiveRateLimiter's
     # per-host backoff state (e.g. after a 429) carries across scanners
     # and endpoints instead of resetting on every single call.
-    scope = ScopeManager(root_domain, allow_local_targets=allow_local)
+    scope = ScopeManager(
+        root_domain,
+        allow_local_targets=allow_local,
+        excluded_hosts=excluded,
+        s3_buckets=buckets,
+        aws_accounts=accounts,
+    )
     rate_limiter = AdaptiveRateLimiter()
     http_engine = HttpEngine(scope_manager=scope, rate_limiter=rate_limiter)
 
-    console.print(f"[cyan][*][/cyan] Discovering endpoints on [bold]{target_url}[/bold] ...")
-    # Offensive-by-default discovery: run every stage (docs + JS + fuzz)
-    # regardless of early hits (aggressive) and sweep the full SecLists-
-    # derived wordlist (deep_fuzz), so protected targets that return few
-    # obvious endpoints still get a thorough pass instead of "0 endpoints".
-    disc_config = DiscoveryConfig(
-        target=target_url,
-        scope=scope,
-        allow_local_targets=allow_local,
-        aggressive=True,
-        deep_fuzz=True,
-    )
-    report = await ApiDiscoveryPipeline(disc_config).run()
-    payload = report.to_json()
-    endpoints = payload.get("endpoints", [])
-    console.print(f"[cyan][*][/cyan] {len(endpoints)} endpoint(s) discovered.")
+    # A DiscoveryReport always exists so BOLA (which consumes the report
+    # object) has one to work with, even in pure import mode.
+    report = DiscoveryReport(target=target_url)
+    endpoints: list[str] = []
+    if user_supplied_domain:
+        console.print(f"[cyan][*][/cyan] Discovering endpoints on [bold]{target_url}[/bold] ...")
+        # Offensive-by-default discovery: run every stage (docs + JS + fuzz)
+        # regardless of early hits (aggressive) and sweep the full SecLists-
+        # derived wordlist (deep_fuzz), so protected targets that return few
+        # obvious endpoints still get a thorough pass instead of "0 endpoints".
+        disc_config = DiscoveryConfig(
+            target=target_url,
+            scope=scope,
+            allow_local_targets=allow_local,
+            aggressive=True,
+            deep_fuzz=True,
+        )
+        report = await ApiDiscoveryPipeline(disc_config).run()
+        payload = report.to_json()
+        endpoints = list(payload.get("endpoints", []))
+        console.print(f"[cyan][*][/cyan] {len(endpoints)} endpoint(s) discovered.")
+
+    # Merge in imported endpoints that fall inside the authorized scope. They
+    # are added to the same per-endpoint queue the scanners loop over below
+    # (and into the report so BOLA sees them too); out-of-scope ones are
+    # dropped (and reported) rather than scanned.
+    if imported and imported.endpoints:
+        seen = set(endpoints)
+        kept = dropped = 0
+        for ep in imported.endpoints:
+            if not scope.is_in_scope(ep):
+                dropped += 1
+                continue
+            report.add_endpoint(ep, source="traffic_import")
+            if ep not in seen:
+                endpoints.append(ep)
+                seen.add(ep)
+                kept += 1
+        console.print(
+            f"[cyan][*][/cyan] Imported endpoints added to queue: {kept}"
+            + (f" ({dropped} out-of-scope, skipped)" if dropped else "")
+        )
 
     if not endpoints:
         console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
