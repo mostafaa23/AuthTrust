@@ -71,6 +71,14 @@ def scan_command(
         ),
     ),
     output: str = typer.Option("wily-report.json", "-o", "--output", help="Path to write the unified report to."),
+    show_leak: bool = typer.Option(
+        False, "--show-leak",
+        help=(
+            "Write evidence UNREDACTED (captured AWS keys/tokens stay visible "
+            "in the report). For a controlled demo only - off by default, which "
+            "redacts secrets."
+        ),
+    ),
 ) -> None:
     """The full bundle, automatically (Discovery + Auth Bypass + CORS + SSRF)
     against any domain, enabling JWT/BOLA/IAM based on the inputs you provide."""
@@ -89,6 +97,7 @@ def scan_command(
             output=output,
             confirm_destructive=confirm_destructive,
             confirm_owned_infra=confirm_owned_infra,
+            show_leak=show_leak,
         )
     )
 

@@ -41,13 +41,15 @@ from wily.recon.parameter_discovery import (
     select_ssrf_candidates,
 )
 from wily.report.json_report import export_json
+from wily.risk.rules_engine import apply_deterministic_rules
+from wily.risk.scoring import compute_risk_score
 from wily.scanners.authz_bypass import (
     AuthzBypassScanner,
     AuthzBypassTarget,
     CorsMisconfigScanner,
     CorsMisconfigTarget,
 )
-from wily.scanners.base import Finding, ScannerConfirmationError
+from wily.scanners.base import Finding, ScannerConfirmationError, run_scanner
 from wily.scanners.bola import BolaTester, Identity
 from wily.scanners.http_engine import HttpEngine
 from wily.scanners.iam_privesc import (
@@ -71,19 +73,26 @@ async def run_full_scan(
     output: str,
     confirm_destructive: bool = True,
     confirm_owned_infra: bool = True,
+    show_leak: bool = False,
 ) -> None:
     all_findings: list = []
 
     if iam_file:
         console.print(f"[cyan][*][/cyan] IAM: analyzing {iam_file} ...")
-        principals = load_authorization_details(Path(iam_file))
-        graph = build_privesc_graph(principals)
-        iam_findings = find_privesc_paths(graph, principals)
-        all_findings += iam_findings
-        console.print(f"[cyan][*][/cyan] IAM: {len(iam_findings)} finding(s).")
+        try:
+            principals = load_authorization_details(Path(iam_file))
+            graph = build_privesc_graph(principals)
+            iam_findings = find_privesc_paths(graph, principals)
+            all_findings += iam_findings
+            console.print(f"[cyan][*][/cyan] IAM: {len(iam_findings)} finding(s).")
+        except Exception as e:
+            # A malformed/partial authorization-details file (missing keys,
+            # bad JSON) must not abort the whole scan - skip IAM and continue
+            # with the rest of the modules.
+            console.print(f"[yellow][!][/yellow] IAM analysis skipped: {e}")
 
     if not domain:
-        _finish(all_findings, output)
+        _finish(all_findings, output, show_leak)
         return
 
     if domain.startswith("http"):
@@ -121,7 +130,7 @@ async def run_full_scan(
 
     if not endpoints:
         console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
-        _finish(all_findings, output)
+        _finish(all_findings, output, show_leak)
         return
 
     canary = OOBCanaryServer() if blind else None
@@ -138,15 +147,17 @@ async def run_full_scan(
                     http_engine=http_engine,
                     confirm_destructive=confirm_destructive,
                 )
-                all_findings += authz_scanner.run(
+                all_findings += await run_scanner(
+                    authz_scanner,
                     AuthzBypassTarget(
                         url=ep_url,
                         include_destructive_methods=confirm_destructive,
-                    )
+                    ),
                 )
-                all_findings += CorsMisconfigScanner(
-                    scope_manager=scope, http_engine=http_engine
-                ).run(CorsMisconfigTarget(url=ep_url))
+                all_findings += await run_scanner(
+                    CorsMisconfigScanner(scope_manager=scope, http_engine=http_engine),
+                    CorsMisconfigTarget(url=ep_url),
+                )
             except ScannerConfirmationError as e:
                 console.print(f"[yellow]    [!][/yellow] Auth Bypass skipped: {e}")
             except Exception as e:
@@ -180,7 +191,7 @@ async def run_full_scan(
                         http_engine=http_engine,
                         confirm_owned_infra=confirm_owned_infra,
                     )
-                    all_findings += ssrf_scanner.run(ssrf_target)
+                    all_findings += await run_scanner(ssrf_scanner, ssrf_target)
             except ScannerConfirmationError as e:
                 console.print(f"[yellow]    [!][/yellow] SSRF skipped: {e}")
             except Exception as e:
@@ -189,9 +200,10 @@ async def run_full_scan(
             if token:
                 try:
                     jwt_target = JwtTarget(url=ep_url, sample_token=token)
-                    all_findings += JwtTamperScanner(
-                        scope_manager=scope, http_engine=http_engine
-                    ).run(jwt_target)
+                    all_findings += await run_scanner(
+                        JwtTamperScanner(scope_manager=scope, http_engine=http_engine),
+                        jwt_target,
+                    )
                 except Exception as e:
                     console.print(f"[yellow]    [!][/yellow] JWT check failed: {e}")
     finally:
@@ -211,7 +223,7 @@ async def run_full_scan(
             "(one identity alone can't be compared) - skipped."
         )
 
-    _finish(all_findings, output)
+    _finish(all_findings, output, show_leak)
 
 
 _BOLA_CONFIDENCE_TO_FLOAT = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.4}
@@ -255,16 +267,34 @@ def _parse_identities(raw: list[str]) -> list[Identity]:
     return identities
 
 
-def _finish(findings: list, output: str) -> None:
+def _finish(findings: list, output: str, show_leak: bool = False) -> None:
+    # Correlation/dedup pass before anything is displayed or written, so the
+    # console summary and the report agree and neither shows the same issue
+    # twice.
+    findings = apply_deterministic_rules(findings)
+
+    # Rank by risk (severity x confidence) so the most important findings are
+    # at the top of both the table and the JSON report.
+    findings.sort(
+        key=lambda f: compute_risk_score(f.severity, f.confidence), reverse=True
+    )
+
     console.print(f"\n[green][+][/green] Total findings: {len(findings)}\n")
     if findings:
-        table = Table(title="All findings")
+        table = Table(title="All findings (highest risk first)")
+        table.add_column("Risk", justify="right")
         table.add_column("Category", style="red")
         table.add_column("Asset", overflow="fold")
         table.add_column("Severity")
         for f in findings:
-            table.add_row(f.category, str(f.asset), f.severity)
+            risk = compute_risk_score(f.severity, f.confidence)
+            table.add_row(f"{risk:.1f}", f.category, str(f.asset), f.severity)
         console.print(table)
 
-    path = export_json(findings, Path(output))
+    path = export_json(findings, Path(output), redact=not show_leak)
+    if show_leak:
+        console.print(
+            "[yellow][!][/yellow] --show-leak: evidence written UNREDACTED "
+            "(captured secrets are visible in the report)."
+        )
     console.print(f"\n[green][+][/green] Unified report: {path.resolve()}")

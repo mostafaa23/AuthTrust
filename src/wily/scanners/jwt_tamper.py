@@ -470,7 +470,14 @@ class JwtTamperScanner(BaseScanner):
             pass
 
         # --- test 5: expiry claims (passive - inspects claims, no forgery) ---
-        expiry_info = analyze_expiry_claims(target.sample_token)
+        # Guarded like every forged-token test above: a sample token that is
+        # not a decodable JWT (e.g. an opaque session string the endpoint
+        # still answers 200 for) must not crash the whole scan here - it just
+        # means there are no JWT claims to analyze.
+        try:
+            expiry_info = analyze_expiry_claims(target.sample_token)
+        except ValueError:
+            return findings
 
         if not expiry_info["has_exp"]:
             findings.append(
