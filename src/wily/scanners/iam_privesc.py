@@ -23,9 +23,19 @@ TODO (v0.2+):
   - Apply Explicit Deny + SCPs + Permissions Boundary before treating any
     edge as "effective" (v0.1 assumes the absence of these restrictions,
     to validate the graph logic first).
-  - The remaining PassRole+Service combinations (Glue, ECS, CodeStar,
-    DataPipeline, CloudFormation beyond what's already covered).
-  - Lambda Code Modification + Trust Policy Abuse as separate categories.
+  - Multi-hop path chaining (today one edge = one finding; chains such as
+    AddUserToGroup -> group's PassRole are not yet stitched together).
+  - Resource-based policy edges (S3/KMS/SNS/SQS/Secrets Manager), which
+    the identity-only graph still does not model.
+
+Covered as of this revision (Rhino Security Labs' 28-method catalog):
+self-mutation (#1-13), PassRole->EC2/Lambda/Glue/ECS/CloudFormation/
+DataPipeline/SageMaker/CodeStar, Trust-Policy Abuse (#14,
+iam:UpdateAssumeRolePolicy+sts:AssumeRole), and single-permission
+Resource Hijack (#18 lambda:UpdateFunctionCode, #26
+lambda:UpdateFunctionConfiguration, #20 glue:UpdateDevEndpoint, #28
+sagemaker:CreatePresignedNotebookInstanceUrl, #23
+codestar:CreateProjectFromTemplate).
 """
 
 from __future__ import annotations
@@ -62,10 +72,17 @@ SELF_MUTATION_ACTIONS = {
 PASS_ROLE_SERVICE_COMBOS = {
     "lambda": {"lambda:CreateFunction", "lambda:InvokeFunction"},
     "ec2": {"ec2:RunInstances"},
-    "glue": {"glue:CreateJob", "glue:StartJobRun"},
+    # glue:CreateDevEndpoint is Rhino Security Labs' actual documented Glue
+    # method (#19); CreateJob/StartJobRun is an equally valid PassRole sink
+    # for a Glue job role - keep both so detection stays broad.
+    "glue": {"glue:CreateJob", "glue:StartJobRun", "glue:CreateDevEndpoint"},
     "ecs": {"ecs:RegisterTaskDefinition", "ecs:RunTask"},
     "cloudformation": {"cloudformation:CreateStack"},
     "datapipeline": {"datapipeline:CreatePipeline", "datapipeline:PutPipelineDefinition"},
+    # Rhino #27: pass a role to a new SageMaker notebook, then open it.
+    "sagemaker": {"sagemaker:CreateNotebookInstance", "sagemaker:CreatePresignedNotebookInstanceUrl"},
+    # Rhino #24: pass a role to a new CodeStar project.
+    "codestar": {"codestar:CreateProject"},
 }
 
 # Some services use a service principal different from the default
@@ -73,6 +90,27 @@ PASS_ROLE_SERVICE_COMBOS = {
 # ecs-tasks.amazonaws.com, not ecs.amazonaws.com).
 SERVICE_PRINCIPAL_OVERRIDES = {
     "ecs": "ecs-tasks.amazonaws.com",
+}
+
+# --- Trust-Policy Abuse (Rhino Security Labs method #14): rewrite a
+# role's AssumeRolePolicyDocument so it trusts you, then assume it. Needs
+# BOTH actions together (editing the trust alone is useless without being
+# able to call sts:AssumeRole afterwards), so this is detected as a combo
+# rather than a single self-mutation action. ---
+TRUST_POLICY_ABUSE_ACTIONS = {"iam:UpdateAssumeRolePolicy", "sts:AssumeRole"}
+
+# --- Resource Hijack: a SINGLE permission that lets a principal take over
+# an existing service resource and inherit the (possibly far more
+# powerful) role already attached to it - no iam:PassRole required. Each
+# key is the AWS action detection keys on; the value is the technique slug
+# used in the category/evidence. Covers Rhino Security Labs methods #18,
+# #26, #20, #28 and #23. ---
+RESOURCE_HIJACK_ACTIONS = {
+    "lambda:UpdateFunctionCode": "lambda_update_code",
+    "lambda:UpdateFunctionConfiguration": "lambda_update_config",
+    "glue:UpdateDevEndpoint": "glue_update_dev_endpoint",
+    "sagemaker:CreatePresignedNotebookInstanceUrl": "sagemaker_notebook_url",
+    "codestar:CreateProjectFromTemplate": "codestar_create_from_template",
 }
 
 
@@ -292,17 +330,39 @@ def build_privesc_graph(principals: list[Principal]) -> nx.DiGraph:
                 evidence_actions=sorted(self_mutation_hits),
             )
 
+        # A full-wildcard ("*") principal is already an admin - every edge
+        # below would be a true-but-useless admin-to-admin escalation (a
+        # known source of noise in PMapper/Cloudsplaining), so stop here.
+        # (self_mutation above intentionally uses literal set membership,
+        # so "*" never triggers it.)
+        if "*" in p.allowed_actions:
+            continue
+
+        # --- Trust-Policy Abuse (self-loop): rewrite a role's trust to
+        # trust yourself, then assume it. Both actions required. ---
+        if TRUST_POLICY_ABUSE_ACTIONS <= p.allowed_actions or all(
+            p.can(a) for a in TRUST_POLICY_ABUSE_ACTIONS
+        ):
+            graph.add_edge(
+                p.arn, p.arn,
+                method="assume_role_policy_update",
+                evidence_actions=sorted(TRUST_POLICY_ABUSE_ACTIONS),
+            )
+
+        # --- Resource Hijack (self-loop): a single permission that takes
+        # over an existing Lambda / Glue dev-endpoint / SageMaker notebook
+        # / CodeStar project and the role already attached to it. ---
+        for action, technique in RESOURCE_HIJACK_ACTIONS.items():
+            if p.can(action):
+                graph.add_edge(
+                    p.arn, p.arn,
+                    method=f"resource_hijack_{technique}",
+                    evidence_actions=[action],
+                )
+
         # --- PassRole + Service: if it has PassRole plus any other
         # combo, it can reach any role whose trust policy lets that
         # service assume it. ---
-        if "*" in p.allowed_actions:
-            # This principal is already an admin (a full wildcard) -
-            # "escalating" it to any other role is technically true but
-            # has no real detection value (it isn't actually an
-            # escalation, it's already at the top). Skip it - a known
-            # source of noise in tools like PMapper/Cloudsplaining for
-            # admin-to-admin edges.
-            continue
         if not p.can("iam:PassRole"):
             continue
 
@@ -337,12 +397,20 @@ def build_privesc_graph(principals: list[Principal]) -> nx.DiGraph:
 
 _METHOD_SEVERITY = {
     "self_mutation": "critical",
+    "assume_role_policy_update": "critical",
     "pass_role_lambda": "critical",
     "pass_role_ec2": "critical",
     "pass_role_glue": "critical",
     "pass_role_ecs": "critical",
     "pass_role_cloudformation": "critical",
+    "pass_role_sagemaker": "critical",
     "pass_role_datapipeline": "high",
+    "pass_role_codestar": "high",
+    "resource_hijack_lambda_update_code": "critical",
+    "resource_hijack_lambda_update_config": "high",
+    "resource_hijack_glue_update_dev_endpoint": "high",
+    "resource_hijack_sagemaker_notebook_url": "high",
+    "resource_hijack_codestar_create_from_template": "high",
 }
 
 _METHOD_REMEDIATION = {
@@ -360,6 +428,36 @@ _METHOD_REMEDIATION = {
     "pass_role_ec2": (
         "Same recommendation as Lambda - restrict iam:PassRole with a "
         "Condition, and reduce the target instance role's permissions."
+    ),
+    "assume_role_policy_update": (
+        "Remove iam:UpdateAssumeRolePolicy from this principal (or scope it "
+        "with a Resource/Condition) - the ability to rewrite a role's trust "
+        "policy plus sts:AssumeRole lets it grant itself any role."
+    ),
+    "resource_hijack_lambda_update_code": (
+        "lambda:UpdateFunctionCode lets this principal overwrite an existing "
+        "function's code and run it under that function's execution role. "
+        "Scope the action by Resource and separate deploy from runtime roles."
+    ),
+    "resource_hijack_lambda_update_config": (
+        "lambda:UpdateFunctionConfiguration lets this principal attach a "
+        "malicious layer to an existing function and inherit its role. Scope "
+        "the action by Resource."
+    ),
+    "resource_hijack_glue_update_dev_endpoint": (
+        "glue:UpdateDevEndpoint lets this principal change an existing Glue "
+        "dev endpoint and run code under its role. Scope the action by "
+        "Resource."
+    ),
+    "resource_hijack_sagemaker_notebook_url": (
+        "sagemaker:CreatePresignedNotebookInstanceUrl grants shell access to "
+        "an existing SageMaker notebook under its attached role. Scope the "
+        "action by Resource and limit who holds it."
+    ),
+    "resource_hijack_codestar_create_from_template": (
+        "codestar:CreateProjectFromTemplate can provision resources under a "
+        "CodeStar service role more privileged than the caller. Remove or "
+        "tightly scope this permission."
     ),
 }
 
@@ -397,6 +495,34 @@ def find_privesc_paths(graph: nx.DiGraph, principals: list[Principal]) -> list[F
                         ),
                     },
                     remediation=_METHOD_REMEDIATION[method],
+                )
+            )
+        elif method == "assume_role_policy_update" or method.startswith("resource_hijack_"):
+            # Self-loop escalations with no distinct target principal (the
+            # victim is a role's trust policy or a hijacked service
+            # resource), so they share the self_mutation finding shape but
+            # keep their own category/technique.
+            findings.append(
+                Finding(
+                    asset=source,
+                    category=f"iam-privesc-{method}",
+                    severity=_METHOD_SEVERITY.get(method, "high"),
+                    confidence=0.8,
+                    discovery_source="scanner",
+                    evidence={
+                        "technique": method,
+                        "principal": source_p.name,
+                        "principal_type": source_p.principal_type,
+                        "evidence_actions": data["evidence_actions"],
+                        "caveat": (
+                            "v0.1: Explicit Deny/SCP/Permissions Boundary have "
+                            "not been checked yet - review manually before "
+                            "remediating."
+                        ),
+                    },
+                    remediation=_METHOD_REMEDIATION.get(
+                        method, "Review and scope this principal's IAM permissions."
+                    ),
                 )
             )
         elif method.startswith("pass_role_"):

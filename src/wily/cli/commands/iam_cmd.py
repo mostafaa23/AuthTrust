@@ -29,7 +29,8 @@ def run(
     output: str = typer.Option("wily-iam-report.json", "-o", "--output", help="Path to write the report to."),
 ) -> None:
     """Builds a permission graph and discovers privilege escalation paths
-    (self-mutation + pass_role across 6 services)."""
+    (self-mutation, trust-policy abuse, resource hijack, and pass_role
+    across 8 services)."""
     console.print(f"[cyan][*][/cyan] Analyzing [bold]{authorization_details_file}[/bold]...")
 
     principals = load_authorization_details(Path(authorization_details_file))
