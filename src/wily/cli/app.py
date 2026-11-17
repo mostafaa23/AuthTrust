@@ -88,6 +88,33 @@ def scan_command(
             "probe goes through the shared, scope-enforced HTTP engine."
         ),
     ),
+    cloud_enum: bool = typer.Option(
+        False, "--cloud-enum/--no-cloud-enum",
+        help=(
+            "Enumerate cloud storage (AWS S3 / Azure Blob / GCP) by generating "
+            "candidate bucket names from the target keyword(s) and mutations "
+            "(cloud_enum-style), then probing each - read-only. Existing AWS "
+            "buckets are auto-handed to the deep s3_bucket scan. OFF by default."
+        ),
+    ),
+    cloud_keyword: list[str] = typer.Option(
+        None, "--cloud-keyword",
+        help=(
+            "Extra keyword(s) to seed cloud-enum name generation (repeatable). "
+            "The target's own name is derived from the domain automatically."
+        ),
+    ),
+    cloud_enum_wordlist: str = typer.Option(
+        None, "--cloud-enum-wordlist",
+        help=(
+            "Path to a mutations wordlist (one per line, e.g. cloud_enum's "
+            "fuzz.txt) replacing the built-in default list."
+        ),
+    ),
+    cloud_enum_max: int = typer.Option(
+        300, "--cloud-enum-max",
+        help="Cap on generated candidate names probed per run (default 300).",
+    ),
     output: str = typer.Option("wily-report.json", "-o", "--output", help="Path to write the unified report to."),
     report_format: list[str] = typer.Option(
         None, "-f", "--format",
@@ -160,6 +187,10 @@ def scan_command(
             confirm_owned_infra=confirm_owned_infra,
             confirm_s3_writes=confirm_s3_writes,
             probe_live=probe_live,
+            cloud_enum=cloud_enum,
+            cloud_keywords=cloud_keyword or [],
+            cloud_enum_wordlist=cloud_enum_wordlist,
+            cloud_enum_max=cloud_enum_max,
             show_leak=show_leak,
             burp_xml=burp_xml,
             import_har=import_har,

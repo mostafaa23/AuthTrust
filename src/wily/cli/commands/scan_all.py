@@ -50,6 +50,12 @@ from wily.recon.parameter_discovery import (
     discover_parameters,
     select_ssrf_candidates,
 )
+from wily.recon.cloud_enum import (
+    azure_account_name,
+    generate_candidates,
+    keyword_from_domain,
+    load_mutations,
+)
 from wily.recon.live_filter import filter_live_assets
 from wily.recon.traffic_import import ImportedTraffic, import_traffic
 from wily.report.html_report import export_html
@@ -75,6 +81,7 @@ from wily.scanners.authz_bypass import (
 )
 from wily.scanners.base import Finding, ScannerConfirmationError, run_scanner
 from wily.scanners.bola import BolaTester, Identity
+from wily.scanners.cloud_storage import CloudStorageScanner, CloudStorageTarget
 from wily.scanners.http_engine import HttpEngine
 from wily.scanners.iam_privesc import (
     build_privesc_graph,
@@ -101,6 +108,10 @@ async def run_full_scan(
     confirm_owned_infra: bool = True,
     confirm_s3_writes: bool = False,
     probe_live: bool = False,
+    cloud_enum: bool = False,
+    cloud_keywords: list[str] | None = None,
+    cloud_enum_wordlist: str | None = None,
+    cloud_enum_max: int = 300,
     show_leak: bool = False,
     burp_xml: str | None = None,
     import_har: str | None = None,
@@ -298,6 +309,23 @@ async def run_full_scan(
         allow_local=allow_local,
         confirm_s3_writes=confirm_s3_writes,
     )
+
+    # --- Cloud resource enumeration (cloud_enum-style). Opt-in: generate
+    # candidate names from the target keyword(s) and probe AWS S3 / Azure Blob /
+    # GCP for existing/open storage, auto-handing AWS hits to the deep s3_bucket
+    # scanner. Keyword-driven, so it runs even with no HTTP endpoints. ---
+    if cloud_enum:
+        await _run_cloud_enum(
+            all_findings=all_findings,
+            scanned=scanned,
+            s3_scan_targets=s3_scan_targets,
+            root_domain=root_domain,
+            keywords=cloud_keywords or [],
+            wordlist_path=cloud_enum_wordlist,
+            max_candidates=cloud_enum_max,
+            rate_limiter=rate_limiter,
+            allow_local=allow_local,
+        )
 
     if not endpoints:
         if not all_findings:
@@ -639,6 +667,114 @@ async def _run_cloud_scanners(
                 console.print(f"[cyan]    [*][/cyan] Takeover indicator on {host}: {len(found)}.")
         except Exception as e:
             console.print(f"[yellow]    [!][/yellow] Takeover scan failed for {host}: {e}")
+
+
+def _provider_engine_factory(allow_local: bool, rate_limiter):
+    """Return ``factory(host) -> HttpEngine`` that builds (and caches) one
+    scope-to-that-host engine per provider host. Each engine's own ScopeManager
+    permits only its single public cloud host; a host that is not a valid scope
+    target yields None (the scanner then skips that provider)."""
+    cache: dict[str, "HttpEngine | None"] = {}
+
+    def factory(host: str):
+        if host in cache:
+            return cache[host]
+        try:
+            eng = HttpEngine(
+                scope_manager=ScopeManager(host, allow_local_targets=allow_local),
+                rate_limiter=rate_limiter,
+            )
+        except ScopeError:
+            eng = None
+        cache[host] = eng
+        return eng
+
+    return factory
+
+
+async def _run_cloud_enum(
+    *,
+    all_findings: list,
+    scanned: set,
+    s3_scan_targets: dict,
+    root_domain: str,
+    keywords: list[str],
+    wordlist_path: str | None,
+    max_candidates: int,
+    rate_limiter,
+    allow_local: bool,
+) -> None:
+    """Generate candidate names from keyword(s) and probe AWS/Azure/GCP storage.
+
+    AWS hits are handed to the deep ``s3_bucket`` scanner (the "auto -> S3
+    scanner" flow); Azure and GCP hits are reported directly. All probes are
+    read-only GETs through per-host, scope-enforcing engines.
+    """
+    kws = [k for k in keywords if k.strip()]
+    derived = keyword_from_domain(root_domain)
+    if derived and derived not in kws:
+        kws.append(derived)
+    if not kws:
+        console.print("[yellow][!][/yellow] Cloud enum: no usable keyword, skipped.")
+        return
+
+    mutations = None
+    if wordlist_path:
+        try:
+            mutations = load_mutations(wordlist_path)
+        except OSError as e:
+            console.print(f"[yellow][!][/yellow] Cloud enum wordlist ignored: {e}")
+
+    candidates = generate_candidates(kws, mutations, max_candidates=max_candidates)
+    console.print(
+        f"[cyan][*][/cyan] Cloud enum: {len(candidates)} candidate name(s) from "
+        f"keyword(s) {', '.join(kws)} (AWS/Azure/GCP)."
+    )
+
+    factory = _provider_engine_factory(allow_local, rate_limiter)
+    enum_scanner = CloudStorageScanner(engine_factory=factory)
+    aws_hits: set[str] = set()
+
+    for name in candidates:
+        target = CloudStorageTarget(name=name, azure_account=azure_account_name(name))
+        try:
+            found = await run_scanner(enum_scanner, target)
+        except Exception as e:
+            console.print(f"[yellow]    [!][/yellow] Cloud enum failed for {name}: {e}")
+            continue
+        if not found:
+            continue
+        all_findings += found
+        scanned.add(("cloud_storage_enum", name))
+        for f in found:
+            if f.evidence.get("provider") == "aws":
+                aws_hits.add(f.evidence.get("bucket") or name)
+            console.print(
+                f"[cyan]    [*][/cyan] {f.category}: {f.asset}"
+            )
+
+    # Auto hand-off: run the deep S3 scanner on every existing AWS bucket found.
+    for bucket in sorted(aws_hits):
+        asset = f"s3://{bucket}"
+        if ("s3_bucket", asset) in scanned:
+            continue
+        engine = _build_s3_engine(bucket, None, allow_local, rate_limiter)
+        if engine is None:
+            continue
+        s3_target = S3BucketTarget(bucket=bucket)
+        try:
+            deep = await run_scanner(
+                S3BucketScanner(http_engine=engine, confirm_writes=False), s3_target
+            )
+            all_findings += deep
+            scanned.add(("s3_bucket", asset))
+            s3_scan_targets[asset] = (engine, s3_target)
+            if deep:
+                console.print(
+                    f"[cyan]    [>][/cyan] s3_bucket deep scan on {bucket}: {len(deep)} finding(s)."
+                )
+        except Exception as e:
+            console.print(f"[yellow]    [!][/yellow] s3_bucket deep scan failed for {bucket}: {e}")
 
 
 _BOLA_CONFIDENCE_TO_FLOAT = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.4}
