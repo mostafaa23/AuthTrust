@@ -1,34 +1,70 @@
 # Wily
 
-> Cloud-native, black-box API security scanner.
-> Starts from a domain you're authorized to test, discovers assets and
-> cloud services, routes each one to the appropriate checks, and produces
-> a unified report with evidence and a severity/confidence rating.
+> Cloud-native, black-box API & cloud security scanner.
 
-## Current status
+Wily starts from a domain you're authorized to test, discovers assets and
+cloud services, routes each one to the appropriate checks, and produces a
+unified report (JSON / HTML / SARIF) with evidence and a severity &
+confidence rating for every finding.
 
-Five scanner modules are implemented and tested end-to-end against local
-demo targets (see `demo/`): JWT Tampering, API Auth Bypass (+ CORS +
-stage inconsistency), BOLA / cross-tenant access, IAM privilege
-escalation, and cloud SSRF/IMDS. Endpoint discovery (`recon/
-api_discovery.py`) and parameter discovery/classification
-(`recon/parameter_discovery.py`) are also implemented. The unified `wily
-scan` CLI command runs the full bundle automatically.
+> **Note on names:** the GitHub repository is `AuthTrust`, but the installed
+> command and the Python package are both named **`wily`**.
 
-Not yet implemented: subdomain enumeration, standalone DNS/HTTP fingerprinting
-and JS analysis as separate modules (their core logic already lives inside
-`api_discovery.py`), the YAML template engine (`templates/loader.py`),
-HTML/SARIF reporting, and the ML ranking/dedup layer (`risk/ml/`). These
-raise `NotImplementedError` rather than pretending to work - see the
-module-level docstrings in each file for what's planned.
+## What it does
+
+Wily bundles eight detection engines behind a single `wily scan` command and
+also exposes several of them as focused standalone subcommands:
+
+1. **JWT Tampering** — algorithm confusion, `alg:none`, weak-secret and
+   signature-bypass checks against a sample token.
+2. **API Auth Bypass** — broken-authorization probes, plus CORS
+   misconfiguration and stage/environment inconsistency detection.
+3. **BOLA / cross-tenant access** — compares two or more identities to find
+   objects one tenant can reach that belong to another.
+4. **IAM privilege escalation** — offline analysis of an AWS
+   `get-account-authorization-details` export (passrole, trust-policy abuse,
+   resource hijack, and related escalation paths).
+5. **Cloud SSRF / IMDS** — makes the target fetch internal cloud metadata
+   endpoints to reveal server-side request forgery.
+6. **Endpoint & parameter discovery** — OpenAPI, JavaScript and wordlist-based
+   asset discovery feeding the scan queue.
+7. **Cloud storage enumeration** — `cloud_enum`-style AWS S3 / Azure Blob /
+   GCP bucket name generation and probing, with automatic hand-off of live
+   S3 buckets to the deep bucket-misconfiguration scan.
+8. **Reporting & ranking** — a light-ML de-duplication/risk-ranking layer and
+   unified JSON, HTML and SARIF report writers.
 
 ## Install
 
+Install straight from GitHub. **[pipx](https://pipx.pypa.io)** is recommended
+because it installs the `wily` command into an isolated environment and puts it
+on your `PATH`:
+
 ```bash
-pip install -e ".[dev]"
+pipx install git+https://github.com/mostafaa23/AuthTrust.git
 ```
 
+Or with plain `pip` (ideally inside a virtual environment):
+
+```bash
+pip install git+https://github.com/mostafaa23/AuthTrust.git
+```
+
+Either way you get the **`wily`** command available in your terminal:
+
+```bash
+wily --version
+wily -h
+```
+
+Python 3.11 or 3.12 is required.
+
 ## Usage
+
+```bash
+# See every command and global option
+wily -h
+```
 
 ```bash
 # The full bundle, automatically: discovery + auth bypass + CORS + SSRF
@@ -38,70 +74,46 @@ wily scan example.com -o report.json
 wily scan example.com --token eyJhbGciOi... -o report.json
 
 # Add BOLA (needs at least two identities to compare)
-wily scan example.com --identity tenant_a="Bearer xyz" --identity tenant_b="Bearer abc"
+wily scan example.com \
+  --identity tenant_a="Bearer xyz" \
+  --identity tenant_b="Bearer abc"
 
-# Add IAM privilege-escalation analysis (fully independent of the domain)
-wily scan example.com --iam-file authorization-details.json
+# Analyze an AWS IAM authorization-details export for privilege escalation
+wily scan --iam-file authorization-details.json
 
-# Enable Blind SSRF (level 4, via a local OOB canary)
-wily scan example.com --blind
-
-# Explicitly confirm destructive-method probes (POST/PUT/DELETE/PATCH) in Auth Bypass
-wily scan example.com --confirm-destructive
-
-# Explicitly confirm the SSRF/IMDS check (it makes the target fetch
-# internal metadata on your behalf - only for infrastructure you own)
-wily scan example.com --confirm-owned-infra
-
-# A single, focused module
-wily jwt https://api.example.com/profile --token eyJhbGciOi...
-wily authz https://api.example.com/orders/123
-wily ssrf https://api.example.com/fetch --param url --confirm-owned-infra
-wily iam authorization-details.json
-wily discover example.com
+# Produce HTML and SARIF alongside JSON
+wily scan example.com -o report.json --format html,sarif
 ```
 
-Run any demo end-to-end locally (spins up its own vulnerable Flask app,
-no external network access needed):
+Each engine is also available on its own:
 
 ```bash
-python demo/run_jwt_demo.py
-python demo/run_authz_demo.py
-python demo/run_ssrf_demo.py
-python demo/run_iam_demo.py
-python demo/run_bola_demo.py
-python demo/run_discovery_demo.py
+wily jwt <url> --token TOKEN_VALUE   # JWT Tampering only
+wily authz <url>                     # API Auth Bypass only
+wily iam authorization-details.json  # IAM privilege-escalation only
+wily ssrf <url> --param url          # IMDS cloud SSRF only
+wily discover <domain>               # Endpoint discovery only, no scanning
 ```
 
-## Project layout
+Run `wily <command> -h` for the full set of options on any subcommand.
 
-- `cli/`        : command-line interface (Typer + Rich)
-- `core/`       : scope & consent validation, adaptive rate limiting, the
-                   OOB canary server, shared HTTP redirect/scope policy
-- `recon/`      : asset discovery (endpoint discovery, parameter discovery)
-- `classify/`   : routes each discovered asset to the right scanner (planned)
-- `templates/`  : the YAML rule system + pydantic schema (planned)
-- `scanners/`   : the implementation of each vulnerability class (BOLA,
-                   SSRF/IMDS, IAM, JWT, Auth Bypass/CORS)
-- `evidence/`   : evidence storage and redaction (secrets/tokens/cookies/API keys)
-- `risk/`       : a deterministic rules engine + Risk Score + ML ranking (planned)
-- `report/`     : JSON (implemented), HTML/SARIF (planned) output
-- `lambda/`     : AWS Lambda function to send the report via SES (planned)
+## Safety
 
-## Safety model
+Wily is a **detection-oriented** scanner intended for authorized testing only.
 
-- Every HTTP request goes through a single, mandatory `HttpEngine` that
-  enforces scope on the original URL *and* every redirect hop, resolves
-  and rejects private/loopback/link-local/metadata addresses, and
-  applies adaptive per-host rate limiting with 429 backoff.
-- Non-destructive checks (GET/HEAD) are the default everywhere. Tests
-  that can mutate target state (write-method authz probes) or that
-  require you to own the target infrastructure (the SSRF/IMDS check)
-  require an explicit, separate confirmation flag and are excluded from
-  an ordinary scan otherwise.
-- Evidence is redacted (AWS credentials, bearer tokens, generic API
-  keys, sensitive headers) before it is written to any report.
+- It enforces a target **scope** and refuses out-of-scope hosts; local
+  addresses require an explicit `--allow-local`.
+- Cloud-storage and S3 checks are **read-only** — Wily reads bucket
+  ACLs/policies and never issues `PUT`/`DELETE`, so it cannot overwrite or
+  delete objects.
+- Genuinely offensive behaviors are opt-in and clearly flagged: write-method
+  authorization probes (`--no-destructive` to disable), SSRF/IMDS checks
+  (`--no-owned-infra` to disable), and blind SSRF (`--blind`).
+- Captured secrets in reports are **redacted by default**.
+
+Only run Wily against systems you own or have explicit, written permission to
+test.
 
 ## License
 
-MIT (subject to change as needed)
+Released under the [MIT License](LICENSE).

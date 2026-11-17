@@ -35,6 +35,7 @@ app = typer.Typer(
     help="Cloud-native, black-box API security scanner.",
     add_completion=True,
     no_args_is_help=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
 

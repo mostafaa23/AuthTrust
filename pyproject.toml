@@ -4,8 +4,31 @@ version = "0.1.0"
 description = "Cloud-native, black-box API security scanner"
 readme = "README.md"
 requires-python = ">=3.11"
-authors = [{ name = "Your Name" }]
+authors = [{ name = "mostafaa23" }]
 license = { text = "MIT" }
+keywords = [
+    "security",
+    "api-security",
+    "vulnerability-scanner",
+    "cloud-security",
+    "pentesting",
+    "ssrf",
+    "jwt",
+    "iam",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+]
 
 dependencies = [
     "typer>=0.12",
@@ -26,6 +49,10 @@ dependencies = [
 [project.optional-dependencies]
 ml = ["scikit-learn>=1.4", "numpy>=1.26"]
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "ruff>=0.4", "flask>=3.0"]
+
+[project.urls]
+Homepage = "https://github.com/mostafaa23/AuthTrust"
+Repository = "https://github.com/mostafaa23/AuthTrust"
 
 [project.scripts]
 wily = "wily.cli.app:main"
