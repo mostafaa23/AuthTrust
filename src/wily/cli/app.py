@@ -89,6 +89,15 @@ def scan_command(
         ),
     ),
     output: str = typer.Option("wily-report.json", "-o", "--output", help="Path to write the unified report to."),
+    report_format: list[str] = typer.Option(
+        None, "-f", "--format",
+        help=(
+            "Report format(s): json, html, sarif. Repeatable and/or "
+            "comma-separated (e.g. --format html,sarif). Default: json. "
+            "Non-JSON formats are written as siblings of -o with their own "
+            "extension (wily-report.html, wily-report.sarif)."
+        ),
+    ),
     show_leak: bool = typer.Option(
         False, "--show-leak",
         help=(
@@ -146,6 +155,7 @@ def scan_command(
             allow_local=allow_local,
             blind=blind,
             output=output,
+            report_formats=report_format or [],
             confirm_destructive=confirm_destructive,
             confirm_owned_infra=confirm_owned_infra,
             confirm_s3_writes=confirm_s3_writes,

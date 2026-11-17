@@ -1,1 +1,184 @@
-<!-- TODO: Jinja2 base template for the interactive HTML report -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wily Security Report</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #1a2029; --fg: #e6e6e6; --muted: #8a94a6;
+    --border: #2a3340; --accent: #4a9eff;
+    --critical: #ff4d4f; --high: #ff7a45; --medium: #ffc53d;
+    --low: #52c41a; --info: #40a9ff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.5;
+  }
+  header { padding: 24px 32px; border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0 0 4px; font-size: 22px; }
+  header .meta { color: var(--muted); font-size: 13px; }
+  main { padding: 24px 32px; }
+  .summary { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+  .chip {
+    padding: 6px 12px; border-radius: 6px; background: var(--panel);
+    border: 1px solid var(--border); font-size: 13px;
+  }
+  .chip b { font-size: 16px; }
+  .banner {
+    padding: 10px 14px; border-radius: 6px; margin-bottom: 20px; font-size: 13px;
+  }
+  .banner.redacted { background: #14331f; border: 1px solid #237a3f; color: #9be8b4; }
+  .banner.leaked { background: #3a1414; border: 1px solid #a33; color: #ffb3b3; }
+  .controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; align-items: center; }
+  .controls input, .controls select {
+    background: var(--panel); color: var(--fg); border: 1px solid var(--border);
+    border-radius: 6px; padding: 7px 10px; font-size: 13px;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { cursor: pointer; user-select: none; color: var(--muted); font-weight: 600; white-space: nowrap; }
+  th:hover { color: var(--fg); }
+  tr.finding-row { cursor: pointer; }
+  tr.finding-row:hover { background: var(--panel); }
+  .asset { font-family: Consolas, Menlo, monospace; word-break: break-all; }
+  .sev {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    font-size: 12px; font-weight: 700; text-transform: uppercase; color: #11151c;
+  }
+  .sev-critical { background: var(--critical); }
+  .sev-high { background: var(--high); }
+  .sev-medium { background: var(--medium); }
+  .sev-low { background: var(--low); }
+  .sev-info { background: var(--info); }
+  .risk { font-variant-numeric: tabular-nums; font-weight: 600; }
+  .detail { display: none; background: #11161d; }
+  .detail.open { display: table-row; }
+  .detail td { padding: 14px 18px; }
+  .detail dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; }
+  .detail dt { color: var(--muted); font-family: Consolas, Menlo, monospace; }
+  .detail dd { margin: 0; word-break: break-word; white-space: pre-wrap; }
+  .rem { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); color: #cfe6ff; }
+  .empty { color: var(--muted); padding: 30px 0; text-align: center; }
+  footer { color: var(--muted); font-size: 12px; padding: 16px 32px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Wily Security Report</h1>
+  <div class="meta">Generated {{ generated_at }} &middot; {{ count }} finding{{ '' if count == 1 else 's' }}</div>
+</header>
+<main>
+  <div class="summary">
+    {% for sev, n in severity_counts %}
+    <span class="chip"><span class="sev sev-{{ sev }}">{{ sev }}</span> <b>{{ n }}</b></span>
+    {% endfor %}
+    {% if not severity_counts %}<span class="chip">No findings</span>{% endif %}
+  </div>
+
+  {% if redacted %}
+  <div class="banner redacted">Evidence is <b>redacted</b> (secrets masked). This report is safe to share.</div>
+  {% else %}
+  <div class="banner leaked">&#9888; <b>--show-leak</b>: evidence is UNREDACTED &mdash; captured secrets are visible. Do not share.</div>
+  {% endif %}
+
+  {% if findings %}
+  <div class="controls">
+    <input id="search" type="search" placeholder="Filter by asset / category / text&hellip;" oninput="applyFilters()">
+    <select id="sevFilter" onchange="applyFilters()">
+      <option value="">All severities</option>
+      <option value="critical">Critical</option>
+      <option value="high">High</option>
+      <option value="medium">Medium</option>
+      <option value="low">Low</option>
+      <option value="info">Info</option>
+    </select>
+  </div>
+
+  <table id="findings">
+    <thead>
+      <tr>
+        <th onclick="sortBy(0, true)">Risk</th>
+        <th onclick="sortBy(1, true)">Severity</th>
+        <th onclick="sortBy(2, false)">Category</th>
+        <th onclick="sortBy(3, false)">Asset</th>
+        <th onclick="sortBy(4, false)">Source</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for f in findings %}
+      <tr class="finding-row" data-severity="{{ f.severity }}"
+          data-search="{{ (f.asset ~ ' ' ~ f.category ~ ' ' ~ f.severity)|lower }}"
+          data-risk="{{ f.risk_score }}" data-sevrank="{{ f.severity_rank }}"
+          onclick="toggleDetail(this)">
+        <td class="risk">{{ '%.1f'|format(f.risk_score) }}</td>
+        <td><span class="sev sev-{{ f.severity }}">{{ f.severity }}</span></td>
+        <td>{{ f.category }}</td>
+        <td class="asset">{{ f.asset }}</td>
+        <td>{{ f.discovery_source }}</td>
+      </tr>
+      <tr class="detail">
+        <td colspan="5">
+          <dl>
+            <dt>confidence</dt><dd>{{ '%.2f'|format(f.confidence) }}</dd>
+            {% if f.scanned_at %}<dt>scanned_at</dt><dd>{{ f.scanned_at }}</dd>{% endif %}
+            {% for k, v in f.evidence %}
+            <dt>{{ k }}</dt><dd>{{ v }}</dd>
+            {% endfor %}
+          </dl>
+          {% if f.remediation %}<div class="rem"><b>Remediation:</b> {{ f.remediation }}</div>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <div id="nomatch" class="empty" style="display:none">No findings match the current filter.</div>
+  {% else %}
+  <div class="empty">No findings were reported.</div>
+  {% endif %}
+</main>
+<footer>Wily &middot; cloud-native API security scanner. Verify every finding manually before acting on it.</footer>
+
+<script>
+function toggleDetail(row) {
+  var detail = row.nextElementSibling;
+  if (detail && detail.classList.contains('detail')) detail.classList.toggle('open');
+}
+function applyFilters() {
+  var q = (document.getElementById('search').value || '').toLowerCase();
+  var sev = document.getElementById('sevFilter').value;
+  var rows = document.querySelectorAll('#findings tbody tr.finding-row');
+  var shown = 0;
+  rows.forEach(function (row) {
+    var match = (!q || row.dataset.search.indexOf(q) !== -1) &&
+                (!sev || row.dataset.severity === sev);
+    row.style.display = match ? '' : 'none';
+    var detail = row.nextElementSibling;
+    if (detail && detail.classList.contains('detail')) {
+      if (!match) detail.classList.remove('open');
+      detail.style.display = match ? '' : 'none';
+    }
+    if (match) shown++;
+  });
+  document.getElementById('nomatch').style.display = shown ? 'none' : 'block';
+}
+function sortBy(col, numeric) {
+  var tbody = document.querySelector('#findings tbody');
+  var pairs = [];
+  var rows = tbody.querySelectorAll('tr.finding-row');
+  rows.forEach(function (row) { pairs.push([row, row.nextElementSibling]); });
+  pairs.sort(function (a, b) {
+    var av, bv;
+    if (numeric && col === 0) { av = parseFloat(a[0].dataset.risk); bv = parseFloat(b[0].dataset.risk); return bv - av; }
+    if (numeric && col === 1) { av = parseInt(a[0].dataset.sevrank); bv = parseInt(b[0].dataset.sevrank); return av - bv; }
+    av = a[0].cells[col].textContent.toLowerCase();
+    bv = b[0].cells[col].textContent.toLowerCase();
+    return av < bv ? -1 : av > bv ? 1 : 0;
+  });
+  pairs.forEach(function (p) { tbody.appendChild(p[0]); if (p[1]) tbody.appendChild(p[1]); });
+}
+</script>
+</body>
+</html>

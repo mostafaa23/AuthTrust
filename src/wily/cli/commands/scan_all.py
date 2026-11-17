@@ -52,7 +52,9 @@ from wily.recon.parameter_discovery import (
 )
 from wily.recon.live_filter import filter_live_assets
 from wily.recon.traffic_import import ImportedTraffic, import_traffic
+from wily.report.html_report import export_html
 from wily.report.json_report import export_json
+from wily.report.sarif_report import export_sarif
 from wily.scanners.s3_bucket import S3BucketScanner, S3BucketTarget, s3_host_for
 from wily.scanners.secret_scan import (
     SecretScanScanner,
@@ -94,6 +96,7 @@ async def run_full_scan(
     allow_local: bool,
     blind: bool,
     output: str,
+    report_formats: list[str] | None = None,
     confirm_destructive: bool = True,
     confirm_owned_infra: bool = True,
     confirm_s3_writes: bool = False,
@@ -176,7 +179,7 @@ async def run_full_scan(
             )
 
     if not domain:
-        _finish(all_findings, output, show_leak)
+        _finish(all_findings, output, show_leak, report_formats)
         return
 
     if domain.startswith("http"):
@@ -299,7 +302,7 @@ async def run_full_scan(
     if not endpoints:
         if not all_findings:
             console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
-        _finish(all_findings, output, show_leak)
+        _finish(all_findings, output, show_leak, report_formats)
         return
 
     canary = OOBCanaryServer() if blind else None
@@ -446,7 +449,7 @@ async def run_full_scan(
                 # surface it as a justified next step for the analyst.
                 console.print(f"[cyan]    [>][/cyan] recommend {fu.scanner} on {fu.asset} — {fu.reason}")
 
-    _finish(all_findings, output, show_leak)
+    _finish(all_findings, output, show_leak, report_formats)
 
 
 _BARE_BUCKET_RE = re.compile(r"[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]")
@@ -679,7 +682,74 @@ def _parse_identities(raw: list[str]) -> list[Identity]:
     return identities
 
 
-def _finish(findings: list, output: str, show_leak: bool = False) -> None:
+_VALID_FORMATS = ("json", "html", "sarif")
+
+# Each writer takes (findings, path, redact=..., preserve_order=...) and the
+# extension its output path should carry.
+_FORMAT_WRITERS = {
+    "json": (export_json, ".json"),
+    "html": (export_html, ".html"),
+    "sarif": (export_sarif, ".sarif"),
+}
+
+
+def parse_report_formats(raw: list[str] | None) -> list[str]:
+    """Normalize --format values (repeatable and/or comma-separated) into an
+    ordered, de-duplicated list of known formats. Unknown tokens are dropped
+    with a warning; JSON is always included so the default report never
+    vanishes."""
+    formats: list[str] = []
+    for item in raw or []:
+        for token in str(item).split(","):
+            name = token.strip().lower()
+            if not name:
+                continue
+            if name not in _VALID_FORMATS:
+                console.print(f"[yellow][!][/yellow] Unknown --format '{name}', ignored.")
+                continue
+            if name not in formats:
+                formats.append(name)
+    if "json" not in formats:
+        formats.insert(0, "json")
+    return formats
+
+
+def _report_path(output: Path, fmt: str) -> Path:
+    """Where format ``fmt`` is written relative to the user's -o path.
+
+    The requested path keeps its exact name for the format that matches its
+    suffix (so JSON stays at ``wily-report.json``); other formats are written
+    as siblings with the format's own extension.
+    """
+    writer, ext = _FORMAT_WRITERS[fmt]
+    if output.suffix.lower() == ext:
+        return output
+    # Strip a known report extension before appending the new one, so
+    # "wily-report.json" + html -> "wily-report.html", not ".json.html".
+    stem = output
+    if output.suffix.lower() in (".json", ".html", ".sarif"):
+        stem = output.with_suffix("")
+    return stem.with_name(stem.name + ext)
+
+
+def _write_reports(
+    findings: list, output: str, show_leak: bool, report_formats: list[str] | None
+) -> None:
+    formats = parse_report_formats(report_formats)
+    base = Path(output)
+    for fmt in formats:
+        writer, _ext = _FORMAT_WRITERS[fmt]
+        path = _report_path(base, fmt)
+        writer(findings, path, redact=not show_leak, preserve_order=True)
+        console.print(f"[green][+][/green] {fmt.upper()} report: {path.resolve()}")
+
+
+def _finish(
+    findings: list,
+    output: str,
+    show_leak: bool = False,
+    report_formats: list[str] | None = None,
+) -> None:
     # Correlation/dedup pass before anything is displayed or written, so the
     # console summary and the report agree and neither shows the same issue
     # twice. Three light passes, in order:
@@ -703,12 +773,9 @@ def _finish(findings: list, output: str, show_leak: bool = False) -> None:
             table.add_row(f"{risk:.1f}", f.category, str(f.asset), f.severity)
         console.print(table)
 
-    path = export_json(
-        findings, Path(output), redact=not show_leak, preserve_order=True
-    )
     if show_leak:
         console.print(
             "[yellow][!][/yellow] --show-leak: evidence written UNREDACTED "
             "(captured secrets are visible in the report)."
         )
-    console.print(f"\n[green][+][/green] Unified report: {path.resolve()}")
+    _write_reports(findings, output, show_leak, report_formats)
