@@ -70,6 +70,15 @@ def scan_command(
             "behalf - pass --no-owned-infra to skip it."
         ),
     ),
+    confirm_s3_writes: bool = typer.Option(
+        False, "--confirm-s3-writes/--no-s3-writes",
+        help=(
+            "Report S3 write/delete exposure. OFF by default (safe). Even when "
+            "on, Wily only READS the bucket ACL/policy and infers writability "
+            "from a public WRITE grant - it never sends a PUT/DELETE, so it "
+            "cannot overwrite or delete objects on any target."
+        ),
+    ),
     output: str = typer.Option("wily-report.json", "-o", "--output", help="Path to write the unified report to."),
     show_leak: bool = typer.Option(
         False, "--show-leak",
@@ -130,6 +139,7 @@ def scan_command(
             output=output,
             confirm_destructive=confirm_destructive,
             confirm_owned_infra=confirm_owned_infra,
+            confirm_s3_writes=confirm_s3_writes,
             show_leak=show_leak,
             burp_xml=burp_xml,
             import_har=import_har,

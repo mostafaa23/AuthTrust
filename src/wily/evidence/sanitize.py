@@ -17,6 +17,7 @@ looser rule, so an unrelated field that happens to contain the substring
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 _REDACTED = "[REDACTED]"
 
@@ -51,9 +52,144 @@ _SENSITIVE_PATTERNS: list[tuple[str, re.Pattern]] = [
         "generic_api_key",
         re.compile(r"(?i)(api[_-]?key)\s*[:=]\s*['\"]?[A-Za-z0-9\-_]{16,}"),
     ),
+    # Google API key (AIza...), 39 chars total.
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b")),
+    # GitHub personal/OAuth/app/refresh tokens (ghp_, gho_, ghu_, ghs_, ghr_).
+    ("github_token", re.compile(r"\bgh[posru]_[A-Za-z0-9]{36,255}\b")),
+    # Slack tokens (bot/user/app/refresh/legacy).
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
+    # PEM private key blocks (RSA/EC/DSA/OPENSSH/PGP or plain).
+    (
+        "private_key",
+        re.compile(
+            r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----"
+            r".*?-----END (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY-----",
+            re.DOTALL,
+        ),
+    ),
 ]
 
 _SENSITIVE_HEADER_NAMES = {"authorization", "cookie", "set-cookie", "x-api-key"}
+
+
+# ---------------------------------------------------------------------------
+# Secret detection (used by scanners/secret_scan.py)
+# ---------------------------------------------------------------------------
+#
+# Redaction (above) answers "make this evidence safe to write out". Detection
+# answers "is there a secret in this text, and what kind" - the same patterns,
+# read the other way round. secret_scan reuses these instead of maintaining a
+# second, drifting copy of the regexes.
+
+# A JWT: three base64url segments, the first starting with the base64 of ``{"``
+# (``eyJ``). The length floors keep random dotted tokens from matching.
+_JWT_RE = re.compile(
+    r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}\b"
+)
+
+# Detectors map a pattern to the capture group that holds the secret *value*
+# (0 = the whole match). Order matters only for which kind is reported when two
+# patterns overlap on the same span; the most specific come first.
+_SECRET_DETECTORS: list[tuple[str, re.Pattern, int]] = [
+    ("aws_access_key_id", re.compile(r"\b(?:AKIA|ASIA|ABIA|ACCA)[0-9A-Z]{16}\b"), 0),
+    (
+        "aws_secret_access_key",
+        re.compile(
+            r'(?i)"?secret[_-]?access[_-]?key"?\s*[:=]\s*"?([A-Za-z0-9/+=]{30,})"?'
+        ),
+        1,
+    ),
+    (
+        "aws_session_token",
+        re.compile(
+            r'(?i)"?(?:session|security)[_-]?token"?\s*[:=]\s*"?([A-Za-z0-9/+=]{80,})"?'
+        ),
+        1,
+    ),
+    ("private_key", _SENSITIVE_PATTERNS[-1][1], 0),
+    ("google_api_key", re.compile(r"\bAIza[0-9A-Za-z\-_]{35}\b"), 0),
+    ("github_token", re.compile(r"\bgh[posru]_[A-Za-z0-9]{36,255}\b"), 0),
+    ("slack_token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"), 0),
+    ("jwt", _JWT_RE, 0),
+    ("bearer_token", re.compile(r"\bBearer\s+([A-Za-z0-9\-_.]{12,})", re.IGNORECASE), 1),
+    (
+        "generic_api_key",
+        re.compile(
+            r"(?i)(?:api[_-]?key|client[_-]?secret|access[_-]?token|auth[_-]?token)"
+            r"['\"]?\s*[:=]\s*['\"]?([A-Za-z0-9\-_]{16,})"
+        ),
+        1,
+    ),
+]
+
+# Kinds that represent live cloud credentials (vs. a generic app secret). These
+# are what the trigger layer escalates into IAM-privilege analysis.
+AWS_CREDENTIAL_KINDS = frozenset(
+    {"aws_access_key_id", "aws_secret_access_key", "aws_session_token"}
+)
+
+
+@dataclass(frozen=True)
+class SecretMatch:
+    """One detected secret. ``secret`` is the raw value (never written to a
+    report); ``masked`` is the short, safe indicator that is."""
+
+    kind: str
+    secret: str
+    masked: str
+    start: int
+    end: int
+
+
+def mask_secret(secret: str) -> str:
+    """Return a short, non-reversible indicator of a secret: enough to
+    correlate it (prefix + last two chars + length) without disclosing it."""
+    s = secret.strip()
+    if "PRIVATE KEY" in s:
+        return f"PEM private key block (len={len(s)})"
+    if len(s) <= 6:
+        return "*" * len(s)
+    prefix = s[:4]
+    suffix = s[-2:]
+    return f"{prefix}{'*' * 6}{suffix} (len={len(s)})"
+
+
+def detect_secrets(text: str) -> list[SecretMatch]:
+    """Find secrets in ``text``. Overlapping matches are resolved by keeping
+    the first (most specific) detector that claims a span, so one secret is
+    not double-reported as two kinds."""
+    if not text:
+        return []
+    out: list[SecretMatch] = []
+    claimed: list[tuple[int, int]] = []
+
+    def _overlaps(start: int, end: int) -> bool:
+        return any(not (end <= s or start >= e) for s, e in claimed)
+
+    for kind, pattern, group in _SECRET_DETECTORS:
+        for m in pattern.finditer(text):
+            try:
+                value = m.group(group)
+            except IndexError:  # pragma: no cover - defensive
+                continue
+            if not value:
+                continue
+            vstart = m.start(group)
+            vend = m.end(group)
+            if _overlaps(vstart, vend):
+                continue
+            claimed.append((vstart, vend))
+            out.append(
+                SecretMatch(
+                    kind=kind,
+                    secret=value,
+                    masked=mask_secret(value),
+                    start=vstart,
+                    end=vend,
+                )
+            )
+    out.sort(key=lambda sm: sm.start)
+    return out
 
 
 def sanitize_text(text: str) -> str:

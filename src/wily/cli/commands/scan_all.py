@@ -25,6 +25,7 @@ Safety gates:
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -33,7 +34,12 @@ from rich.table import Table
 
 from wily.core.oob_canary import OOBCanaryServer
 from wily.core.rate_limiter import AdaptiveRateLimiter
-from wily.core.scope_manager import ScopeError, ScopeManager, load_scope_config
+from wily.core.scope_manager import (
+    ScopeError,
+    ScopeManager,
+    extract_bucket_name,
+    load_scope_config,
+)
 from wily.recon.api_discovery import (
     ApiDiscoveryPipeline,
     DiscoveryConfig,
@@ -46,6 +52,13 @@ from wily.recon.parameter_discovery import (
 )
 from wily.recon.traffic_import import ImportedTraffic, import_traffic
 from wily.report.json_report import export_json
+from wily.scanners.s3_bucket import S3BucketScanner, S3BucketTarget, s3_host_for
+from wily.scanners.secret_scan import (
+    SecretScanScanner,
+    SecretScanTarget,
+    SecretSource,
+)
+from wily.scanners.takeover import TakeoverScanner, TakeoverTarget
 from wily.risk.rules_engine import apply_deterministic_rules
 from wily.risk.scoring import compute_risk_score
 from wily.risk.triggers import TriggerContext, derive_followups
@@ -80,6 +93,7 @@ async def run_full_scan(
     output: str,
     confirm_destructive: bool = True,
     confirm_owned_infra: bool = True,
+    confirm_s3_writes: bool = False,
     show_leak: bool = False,
     burp_xml: str | None = None,
     import_har: str | None = None,
@@ -226,18 +240,40 @@ async def run_full_scan(
             + (f" ({dropped} out-of-scope, skipped)" if dropped else "")
         )
 
+    # Track which (scanner, asset) pairs ran, so the finding-driven follow-up
+    # step never re-runs the same test. Defined before the cloud scanners below
+    # so they can register into it too.
+    scanned: set[tuple[str, str]] = set()
+
+    # --- Cloud scanners (S3 misconfig, secrets, takeover). These are not tied
+    # to the per-endpoint API loop: S3 runs off bucket references, secrets off
+    # discovered JS + imported traffic, takeover off discovered hosts. They run
+    # even when no API endpoints were found (e.g. a pure bucket-scope scan). ---
+    s3_scan_targets: dict[str, tuple] = {}  # asset -> (engine, target) for follow-ups
+    await _run_cloud_scanners(
+        all_findings=all_findings,
+        scanned=scanned,
+        s3_scan_targets=s3_scan_targets,
+        endpoints=endpoints,
+        imported=imported,
+        buckets=buckets,
+        root_domain=root_domain,
+        scope=scope,
+        http_engine=http_engine,
+        rate_limiter=rate_limiter,
+        allow_local=allow_local,
+        confirm_s3_writes=confirm_s3_writes,
+    )
+
     if not endpoints:
-        console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
+        if not all_findings:
+            console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
         _finish(all_findings, output, show_leak)
         return
 
     canary = OOBCanaryServer() if blind else None
     if canary:
         console.print(f"[cyan][*][/cyan] OOB canary running locally: {canary.base_url}")
-
-    # Track which (scanner, asset) pairs the broad detection pass already ran,
-    # so the finding-driven follow-up step below never re-runs the same test.
-    scanned: set[tuple[str, str]] = set()
 
     try:
         for ep_url in endpoints:
@@ -339,6 +375,7 @@ async def run_full_scan(
         has_identities=len(identities) >= 2,
         has_canary=False,  # the OOB canary is already stopped here; blind escalation is advised, not auto-run
         has_iam_file=bool(iam_file),
+        confirm_s3_writes=confirm_s3_writes,
     )
     followups = derive_followups(all_findings, context)
     pending = [fu for fu in followups if (fu.scanner, fu.asset) not in scanned]
@@ -355,12 +392,219 @@ async def run_full_scan(
                     console.print(f"[cyan]    [>][/cyan] ran {fu.scanner} on {fu.asset} — {fu.reason}")
                 except Exception as e:
                     console.print(f"[yellow]    [!][/yellow] follow-up {fu.scanner} failed: {e}")
+            elif fu.scanner == "s3_permcheck" and fu.asset in s3_scan_targets:
+                # Deeper S3 step: re-run the bucket with confirm_writes=True so
+                # the (read-only, ACL-derived) write/delete permission check is
+                # evaluated now that a public finding justified it.
+                try:
+                    engine, s3_target = s3_scan_targets[fu.asset]
+                    all_findings += await run_scanner(
+                        S3BucketScanner(
+                            scope_manager=scope,
+                            http_engine=engine,
+                            confirm_writes=True,
+                        ),
+                        s3_target,
+                    )
+                    scanned.add((fu.scanner, fu.asset))
+                    console.print(f"[cyan]    [>][/cyan] ran s3 permission-check on {fu.asset} — {fu.reason}")
+                except Exception as e:
+                    console.print(f"[yellow]    [!][/yellow] follow-up {fu.scanner} failed: {e}")
             else:
                 # No standalone target available to auto-run this one here;
                 # surface it as a justified next step for the analyst.
                 console.print(f"[cyan]    [>][/cyan] recommend {fu.scanner} on {fu.asset} — {fu.reason}")
 
     _finish(all_findings, output, show_leak)
+
+
+_BARE_BUCKET_RE = re.compile(r"[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]")
+
+
+def _concrete_bucket(ref: str) -> str | None:
+    """Resolve a bucket reference (name / s3:// URI / S3 URL) to a concrete
+    bucket name, or None for a glob pattern or non-bucket string (a glob like
+    'target-*' is a scope filter, not something that can be probed)."""
+    name = extract_bucket_name(ref)
+    if name:
+        return name
+    r = (ref or "").strip().lower()
+    if "*" in r or "?" in r:
+        return None
+    return r if _BARE_BUCKET_RE.fullmatch(r) else None
+
+
+def _s3_object_key(ref: str) -> str | None:
+    """Best-effort object key from an s3:// URI or an S3 URL path."""
+    if not isinstance(ref, str):
+        return None
+    v = ref.strip()
+    if v.lower().startswith("s3://"):
+        rest = v[5:].split("?", 1)[0]
+        parts = rest.split("/", 1)
+        return parts[1] if len(parts) == 2 and parts[1] else None
+    if "amazonaws.com" in v.lower():
+        parsed = urlparse(v if "://" in v else "//" + v)
+        host = (parsed.hostname or "").lower()
+        path = parsed.path.lstrip("/")
+        if not path:
+            return None
+        first_label = host.split(".", 1)[0]
+        # Virtual-hosted host is "<bucket>.s3...": the whole path is the key.
+        # Path-style host is "s3...": the first path segment is the bucket, the
+        # remainder is the key.
+        if first_label and first_label != "s3" and not first_label.startswith("s3-"):
+            return path or None
+        parts = path.split("/", 1)
+        return parts[1] if len(parts) == 2 and parts[1] else None
+    return None
+
+
+def _build_s3_engine(
+    bucket: str, region: str | None, allow_local: bool, rate_limiter
+) -> "HttpEngine | None":
+    """An HttpEngine scoped to the bucket's S3 host. S3 endpoints are public,
+    so the engine's own scope guard permits them while still refusing any
+    non-S3 host; returns None if the host is not a usable scope target."""
+    host = s3_host_for(bucket, region)
+    try:
+        s3_scope = ScopeManager(host, allow_local_targets=allow_local)
+    except ScopeError:
+        return None
+    return HttpEngine(scope_manager=s3_scope, rate_limiter=rate_limiter)
+
+
+def _cname_resolver(host: str) -> str | None:
+    """Best-effort CNAME lookup via the stdlib (no extra dependency). The alias
+    list from ``gethostbyname_ex`` carries the CNAME chain; the last alias is
+    the closest-to-target canonical name. Returns None on any failure."""
+    import socket
+
+    try:
+        _name, aliases, _ips = socket.gethostbyname_ex(host)
+    except Exception:
+        return None
+    return aliases[-1] if aliases else None
+
+
+async def _run_cloud_scanners(
+    *,
+    all_findings: list,
+    scanned: set,
+    s3_scan_targets: dict,
+    endpoints: list[str],
+    imported: "ImportedTraffic | None",
+    buckets: tuple[str, ...],
+    root_domain: str,
+    scope: ScopeManager,
+    http_engine: HttpEngine,
+    rate_limiter,
+    allow_local: bool,
+    confirm_s3_writes: bool,
+) -> None:
+    """Run the Phase 3 cloud scanners and fold their findings into the run.
+
+    Each scanner is isolated in its own try/except so a failure in one (or a
+    single bad target) never aborts the scan.
+    """
+    # ---- S3 bucket misconfiguration ------------------------------------
+    # Candidate references: explicit bucket scope + imported s3 links + any S3
+    # URLs discovered among endpoints. Deduplicated by concrete bucket name.
+    s3_refs: list[str] = list(buckets)
+    if imported and imported.s3_links:
+        s3_refs += imported.s3_links
+    s3_refs += [ep for ep in endpoints if extract_bucket_name(ep)]
+
+    seen_buckets: set[str] = set()
+    for ref in s3_refs:
+        bucket = _concrete_bucket(ref)
+        if not bucket or bucket in seen_buckets:
+            continue
+        seen_buckets.add(bucket)
+        # Respect bucket scope when configured.
+        if scope.has_bucket_scope and not scope.is_bucket_in_scope(ref):
+            console.print(f"[yellow]    [!][/yellow] S3 bucket out of scope, skipped: {bucket}")
+            continue
+        engine = _build_s3_engine(bucket, None, allow_local, rate_limiter)
+        if engine is None:
+            continue
+        target = S3BucketTarget(bucket=bucket, sample_object_key=_s3_object_key(ref))
+        try:
+            found = await run_scanner(
+                S3BucketScanner(
+                    scope_manager=scope, http_engine=engine, confirm_writes=False
+                ),
+                target,
+            )
+            all_findings += found
+            scanned.add(("s3_bucket", f"s3://{bucket}"))
+            # Stash for a possible write-permission follow-up (keyed by the
+            # finding asset, which is "s3://<bucket>").
+            s3_scan_targets[f"s3://{bucket}"] = (engine, target)
+            if found:
+                console.print(f"[cyan]    [*][/cyan] S3 {bucket}: {len(found)} finding(s).")
+        except Exception as e:
+            console.print(f"[yellow]    [!][/yellow] S3 scan failed for {bucket}: {e}")
+
+    # ---- Secrets / API-key exposure ------------------------------------
+    secret_sources: list[SecretSource] = []
+    # Observed auth tokens from an imported capture are themselves exposed
+    # credentials; wrap each so the detector sees an Authorization context.
+    for tok in (imported.tokens if imported else []):
+        secret_sources.append(
+            SecretSource(
+                label="imported-traffic-token",
+                content=f"Authorization: Bearer {tok}",
+                location="imported-traffic",
+            )
+        )
+    # Discovered JS bundles are the prime place hardcoded keys leak; fetch the
+    # in-scope ones and scan their bodies.
+    js_urls = [
+        ep for ep in endpoints
+        if urlparse(ep).path.lower().endswith(".js") and scope.is_in_scope(ep)
+    ]
+    if secret_sources or js_urls:
+        try:
+            found = await run_scanner(
+                SecretScanScanner(scope_manager=scope, http_engine=http_engine),
+                SecretScanTarget(sources=secret_sources, fetch_urls=js_urls),
+            )
+            all_findings += found
+            scanned.add(("secret_scan", root_domain))
+            if found:
+                console.print(
+                    f"[cyan]    [*][/cyan] Secret scan: {len(found)} exposed secret(s) "
+                    f"across {len(secret_sources)} source(s) + {len(js_urls)} JS file(s)."
+                )
+        except Exception as e:
+            console.print(f"[yellow]    [!][/yellow] Secret scan failed: {e}")
+
+    # ---- Subdomain / resource takeover ---------------------------------
+    hosts: list[str] = []
+    seen_hosts: set[str] = set()
+    for candidate in [root_domain] + [urlparse(ep).hostname or "" for ep in endpoints]:
+        h = (candidate or "").strip().lower()
+        if not h or h in seen_hosts or not scope.is_in_scope(h):
+            continue
+        seen_hosts.add(h)
+        hosts.append(h)
+    for host in hosts:
+        try:
+            found = await run_scanner(
+                TakeoverScanner(
+                    scope_manager=scope,
+                    http_engine=http_engine,
+                    resolver=_cname_resolver,
+                ),
+                TakeoverTarget(host=host),
+            )
+            all_findings += found
+            scanned.add(("takeover", host))
+            if found:
+                console.print(f"[cyan]    [*][/cyan] Takeover indicator on {host}: {len(found)}.")
+        except Exception as e:
+            console.print(f"[yellow]    [!][/yellow] Takeover scan failed for {host}: {e}")
 
 
 _BOLA_CONFIDENCE_TO_FLOAT = {"HIGH": 0.9, "MEDIUM": 0.6, "LOW": 0.4}

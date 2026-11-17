@@ -60,6 +60,28 @@ def test_credential_marker_in_evidence_triggers_iam_even_for_other_category():
     assert [fu.scanner for fu in out] == ["iam_privesc"]
 
 
+def test_s3_public_triggers_permcheck_only_when_confirmed():
+    findings = [_finding("s3-bucket-public-listing", asset="s3://victim")]
+    # Default: no write permission check (safe).
+    assert derive_followups(findings, TriggerContext()) == []
+    out = derive_followups(findings, TriggerContext(confirm_s3_writes=True))
+    assert [fu.scanner for fu in out] == ["s3_permcheck"]
+    assert out[0].asset == "s3://victim"
+
+
+def test_secret_exposure_aws_triggers_iam_when_file_present():
+    findings = [_finding("secret-exposure-aws-access-key-id", asset="https://x/app.js")]
+    # No IAM file -> nothing (masked evidence carries no credential marker).
+    assert derive_followups(findings, TriggerContext()) == []
+    out = derive_followups(findings, TriggerContext(has_iam_file=True))
+    assert [fu.scanner for fu in out] == ["iam_privesc"]
+
+
+def test_generic_secret_does_not_trigger_iam():
+    findings = [_finding("secret-exposure-generic-api-key", asset="https://x/app.js")]
+    assert derive_followups(findings, TriggerContext(has_iam_file=True)) == []
+
+
 def test_duplicate_scanner_asset_pairs_are_collapsed():
     findings = [
         _finding("authz-bypass-missing-authorizer", asset="https://x/a"),

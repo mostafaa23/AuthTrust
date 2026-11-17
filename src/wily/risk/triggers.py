@@ -40,6 +40,10 @@ class TriggerContext:
     has_identities: bool = False
     has_canary: bool = False
     has_iam_file: bool = False
+    # Opt-in: when set, a public-S3 finding escalates to the (read-only,
+    # ACL-derived) write/delete permission check. Off by default so concluding
+    # "publicly writable" never happens without the tester asking for it.
+    confirm_s3_writes: bool = False
 
 
 # Evidence substrings that indicate leaked cloud credentials were observed.
@@ -97,7 +101,22 @@ def derive_followups(findings: list, context: TriggerContext) -> list[FollowUp]:
         if category.startswith("cloud-ssrf") and context.has_canary:
             _add("ssrf_blind", asset, f"{category} -> confirm server-side request via OOB canary")
 
-        if context.has_iam_file and ("imds" in category or _mentions_credentials(evidence)):
+        # A public S3 bucket (listing/object/ACL) -> the canonical "S3 public ->
+        # try read/permissions" deeper step: a read-only, ACL-derived check of
+        # whether unauthenticated writes/deletes would be accepted. Opt-in.
+        if category.startswith("s3-bucket-public") and context.confirm_s3_writes:
+            _add("s3_permcheck", asset, f"{category} -> check write/delete permissions (ACL-derived, read-only)")
+
+        # Leaked cloud credentials -> IAM privilege-escalation analysis. Fires on
+        # SSRF/IMDS credential leaks (markers in evidence) and on an AWS key found
+        # by the secret scanner (whose evidence is masked, so it is matched by
+        # category, not by a credential marker).
+        is_aws_secret = category.startswith(
+            ("secret-exposure-aws", "secret-exposure-private-key")
+        )
+        if context.has_iam_file and (
+            "imds" in category or is_aws_secret or _mentions_credentials(evidence)
+        ):
             _add("iam_privesc", asset, "leaked cloud credentials -> analyze IAM privilege escalation")
 
     return out
