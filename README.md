@@ -1,6 +1,6 @@
 # Wily
 
-> Cloud-native, black-box API & cloud security scanner.
+> Cloud-native, cloud security scanner.
 
 **📖 شرح المشروع بالعربي:** [README.ar.md](README.ar.md)
 
