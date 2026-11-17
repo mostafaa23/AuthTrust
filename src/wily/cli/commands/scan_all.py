@@ -50,6 +50,7 @@ from wily.recon.parameter_discovery import (
     discover_parameters,
     select_ssrf_candidates,
 )
+from wily.recon.live_filter import filter_live_assets
 from wily.recon.traffic_import import ImportedTraffic, import_traffic
 from wily.report.json_report import export_json
 from wily.scanners.s3_bucket import S3BucketScanner, S3BucketTarget, s3_host_for
@@ -59,6 +60,8 @@ from wily.scanners.secret_scan import (
     SecretSource,
 )
 from wily.scanners.takeover import TakeoverScanner, TakeoverTarget
+from wily.risk.ml.dedup import deduplicate
+from wily.risk.ml.ranker import rank_findings
 from wily.risk.rules_engine import apply_deterministic_rules
 from wily.risk.scoring import compute_risk_score
 from wily.risk.triggers import TriggerContext, derive_followups
@@ -94,6 +97,7 @@ async def run_full_scan(
     confirm_destructive: bool = True,
     confirm_owned_infra: bool = True,
     confirm_s3_writes: bool = False,
+    probe_live: bool = False,
     show_leak: bool = False,
     burp_xml: str | None = None,
     import_har: str | None = None,
@@ -239,6 +243,33 @@ async def run_full_scan(
             f"[cyan][*][/cyan] Imported endpoints added to queue: {kept}"
             + (f" ({dropped} out-of-scope, skipped)" if dropped else "")
         )
+
+    # --- Live-asset filtering (Phase 4, HTTPX-style). Before any expensive
+    # scanner runs, collapse exact + near-identical endpoints (same route with a
+    # different object id) and, optionally, drop endpoints that don't answer a
+    # cheap liveness probe. Dedup is always free; the probe is opt-in
+    # (--probe-live) and goes through the shared, scope-enforcing HttpEngine. ---
+    if endpoints:
+        before = len(endpoints)
+        lf = filter_live_assets(
+            endpoints,
+            scope=scope,
+            http_engine=http_engine if probe_live else None,
+            probe=probe_live,
+        )
+        endpoints = lf.kept
+        if lf.dropped:
+            summary = []
+            if lf.collapsed:
+                summary.append(f"{lf.collapsed} duplicate")
+            if lf.out_of_scope:
+                summary.append(f"{len(lf.out_of_scope)} out-of-scope")
+            if lf.dead:
+                summary.append(f"{len(lf.dead)} dead")
+            console.print(
+                f"[cyan][*][/cyan] Live-asset filter: {before} -> {len(endpoints)} "
+                f"target(s) ({', '.join(summary)} dropped)."
+            )
 
     # Track which (scanner, asset) pairs ran, so the finding-driven follow-up
     # step never re-runs the same test. Defined before the cloud scanners below
@@ -651,14 +682,14 @@ def _parse_identities(raw: list[str]) -> list[Identity]:
 def _finish(findings: list, output: str, show_leak: bool = False) -> None:
     # Correlation/dedup pass before anything is displayed or written, so the
     # console summary and the report agree and neither shows the same issue
-    # twice.
+    # twice. Three light passes, in order:
+    #   1. exact-duplicate collapse (deterministic rules),
+    #   2. near-duplicate clustering (risk/ml/dedup), then
+    #   3. ranking/prioritisation (risk/ml/ranker) - the single source of the
+    #      order the table and the JSON report both use.
     findings = apply_deterministic_rules(findings)
-
-    # Rank by risk (severity x confidence) so the most important findings are
-    # at the top of both the table and the JSON report.
-    findings.sort(
-        key=lambda f: compute_risk_score(f.severity, f.confidence), reverse=True
-    )
+    findings = deduplicate(findings)
+    findings = rank_findings(findings)
 
     console.print(f"\n[green][+][/green] Total findings: {len(findings)}\n")
     if findings:
@@ -672,7 +703,9 @@ def _finish(findings: list, output: str, show_leak: bool = False) -> None:
             table.add_row(f"{risk:.1f}", f.category, str(f.asset), f.severity)
         console.print(table)
 
-    path = export_json(findings, Path(output), redact=not show_leak)
+    path = export_json(
+        findings, Path(output), redact=not show_leak, preserve_order=True
+    )
     if show_leak:
         console.print(
             "[yellow][!][/yellow] --show-leak: evidence written UNREDACTED "

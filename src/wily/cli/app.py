@@ -79,6 +79,15 @@ def scan_command(
             "cannot overwrite or delete objects on any target."
         ),
     ),
+    probe_live: bool = typer.Option(
+        False, "--probe-live/--no-probe-live",
+        help=(
+            "Before scanning, drop discovered/imported endpoints that don't "
+            "answer a cheap HEAD/GET liveness probe. OFF by default; "
+            "de-duplication of near-identical URLs always runs regardless. The "
+            "probe goes through the shared, scope-enforced HTTP engine."
+        ),
+    ),
     output: str = typer.Option("wily-report.json", "-o", "--output", help="Path to write the unified report to."),
     show_leak: bool = typer.Option(
         False, "--show-leak",
@@ -140,6 +149,7 @@ def scan_command(
             confirm_destructive=confirm_destructive,
             confirm_owned_infra=confirm_owned_infra,
             confirm_s3_writes=confirm_s3_writes,
+            probe_live=probe_live,
             show_leak=show_leak,
             burp_xml=burp_xml,
             import_har=import_har,
