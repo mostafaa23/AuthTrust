@@ -24,3 +24,10 @@ env/
 # Editor
 .vscode/
 .idea/
+
+# Local-only: dev/demo harness and deployment infra kept off the published
+# repo (not needed by someone who just installs and runs the `wily` CLI).
+demo/
+lambda/
+Dockerfile
+DEPLOY.md
