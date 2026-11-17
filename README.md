@@ -2,6 +2,8 @@
 
 > Cloud-native, black-box API & cloud security scanner.
 
+**📖 شرح المشروع بالعربي:** [README.ar.md](README.ar.md)
+
 Wily starts from a domain you're authorized to test, discovers assets and
 cloud services, routes each one to the appropriate checks, and produces a
 unified report (JSON / HTML / SARIF) with evidence and a severity &
