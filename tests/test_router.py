@@ -17,9 +17,12 @@ def test_cloud_storage_routes_to_s3():
     assert route_asset(_asset(AssetType.CLOUD_STORAGE)) == ["s3_bucket"]
 
 
-def test_js_file_and_tls_route_to_nothing():
+def test_js_file_routes_to_nothing():
     assert route_asset(_asset(AssetType.JS_FILE)) == []
-    assert route_asset(_asset(AssetType.TLS_SERVICE)) == []
+
+
+def test_tls_service_routes_to_tls_config():
+    assert route_asset(_asset(AssetType.TLS_SERVICE)) == ["tls_config"]
 
 
 def test_route_returns_a_fresh_list():

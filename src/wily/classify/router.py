@@ -40,7 +40,7 @@ _ROUTES: dict[AssetType, list[str]] = {
     AssetType.VERSIONED_SERVICE: ["authz_bypass", "cors_misconfig"],
     AssetType.CLOUD_STORAGE: ["s3_bucket"],
     AssetType.JS_FILE: [],  # mined for endpoints during discovery, not scanned directly
-    AssetType.TLS_SERVICE: [],
+    AssetType.TLS_SERVICE: ["tls_config"],
 }
 
 
