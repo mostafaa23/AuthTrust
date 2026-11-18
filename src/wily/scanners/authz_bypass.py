@@ -84,6 +84,15 @@ class AuthzBypassTarget:
             "forbidden",
         ]
     )
+    # --- Differential baseline (Gap D): a URL known/assumed not to resolve
+    # to a real resource on this host (e.g. the same path with a
+    # random/nonexistent id). Some gateways serve the exact same generic
+    # "not found" or catch-all page for every denied *and* missing request,
+    # worded in a way auth_error_body_signatures doesn't happen to match.
+    # Comparing against this baseline catches that case without needing a
+    # keyword list to guess the app's wording. Opt-in: None disables it.
+    soft_404_probe_url: str | None = None
+    soft_404_similarity_threshold: float = 0.85
 
 
 class AuthzBypassScanner(BaseScanner):
@@ -159,6 +168,19 @@ class AuthzBypassScanner(BaseScanner):
             except Exception:
                 continue
 
+        # Differential baseline (Gap D): fetch a resource known/assumed not to
+        # exist on this host once, up front, so every candidate method below
+        # can be compared against "what a missing resource looks like here".
+        soft_404_body: str | None = None
+        if target.soft_404_probe_url:
+            try:
+                probe_resp = self.http.request(
+                    method="GET", url=target.soft_404_probe_url, headers={}
+                )
+                soft_404_body = getattr(probe_resp, "text", "") or ""
+            except Exception:
+                soft_404_body = None
+
         # --- technique 1: missing_authorizer - any method leaks data with no auth ---
         # A status in leak_indicator_statuses is only a *candidate*: a 200 that
         # actually carries an auth-error message (soft-200 denial) is not a leak
@@ -176,6 +198,22 @@ class AuthzBypassScanner(BaseScanner):
             if self._looks_like_auth_error_body(body, target.auth_error_body_signatures):
                 # soft-200 denial - not a real data leak, do not report
                 continue
+
+            soft_404_similarity: float | None = None
+            if soft_404_body:
+                try:
+                    soft_404_similarity = self.http.similarity(body, soft_404_body)
+                except Exception:
+                    soft_404_similarity = None
+                if (
+                    soft_404_similarity is not None
+                    and soft_404_similarity >= target.soft_404_similarity_threshold
+                ):
+                    # Body matches the "this resource doesn't exist here"
+                    # baseline almost exactly - a generic catch-all page, not
+                    # a real leak of this specific resource's data.
+                    continue
+
             leaking_methods.append(method)
 
             # Confidence is grounded against an authenticated baseline when one
@@ -211,6 +249,7 @@ class AuthzBypassScanner(BaseScanner):
                         "method": method,
                         "response_status": unauthenticated_results[method],
                         "body_similarity_to_authenticated": body_similarity,
+                        "body_similarity_to_soft_404_baseline": soft_404_similarity,
                         "all_methods_tested": unauthenticated_results,
                     },
                     remediation=(

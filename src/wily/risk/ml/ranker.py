@@ -7,6 +7,12 @@ buckets, SSRF/IMDS, IAM privesc, BOLA, takeover) and for findings
 corroborated by duplicate clustering. Boosts are sub-severity, so they
 only reorder ties and never let a low-severity finding outrank a critical
 one. Recorded per-finding in ``evidence['rank_reasons']``/``rank_score``.
+
+Two impact classes (secret-exposure, bola) don't get a flat boost: their
+evidence already carries a signal about how strong the underlying proof is
+(a confirmed live credential vs. a generic pattern match; a directly
+observed owner vs. a guessed/unowned one), so the boost is scaled by that
+context instead of treating every finding in the category the same.
 """
 
 from __future__ import annotations
@@ -14,22 +20,47 @@ from __future__ import annotations
 from wily.risk.scoring import compute_risk_score
 
 # Category-prefix -> impact boost. Matched by ``str.startswith`` so a family
-# (e.g. every "secret-exposure-*") is covered by one entry.
+# (e.g. every "cloud-ssrf-*") is covered by one entry. secret-exposure and
+# bola are handled contextually in ``_impact_boost`` instead of here.
 _IMPACT_BOOSTS: tuple[tuple[str, float], ...] = (
-    ("secret-exposure", 1.5),           # leaked credentials / private keys
     ("cloud-ssrf", 1.5),                # SSRF -> instance metadata
     ("iam-privesc", 1.5),               # privilege escalation paths
     ("s3-bucket-public", 1.0),          # publicly exposed storage
-    ("bola", 1.0),                      # cross-tenant object access
     ("takeover", 1.0),                  # dangling resource / subdomain takeover
     ("authz-bypass", 0.5),              # broken authorization
 )
+
+# secret-exposure: full boost only when the evidence confirms a live,
+# concretely-shaped credential (e.g. secret_scan's is_live_cloud_credential);
+# a generic/weakly-matched secret kind (bearer token, bare "api_key" string,
+# unverified JWT) is still worth flagging but on thinner evidence.
+_SECRET_CONFIRMED_BOOST = 1.5
+_SECRET_UNCONFIRMED_BOOST = 0.8
+
+# bola: how much of the impact boost to apply, scaled by how the candidate's
+# ownership was established (bola.py's BolaFinding.grounding). A directly
+# observed owner is the strongest evidence a cross-tenant leak really
+# happened; a JWT-seeded guess or an unowned candidate is weaker attribution.
+_BOLA_GROUNDING_BOOST = {"observed": 1.0, "seeded": 0.6, "unowned": 0.3}
+_BOLA_DEFAULT_GROUNDING_BOOST = _BOLA_GROUNDING_BOOST["unowned"]
 
 # Lift for a finding that clustering saw more than once.
 _CORROBORATION_BOOST = 0.5
 
 
-def _impact_boost(category: str) -> tuple[float, str | None]:
+def _impact_boost(category: str, evidence: dict) -> tuple[float, str | None]:
+    if category.startswith("secret-exposure"):
+        if evidence.get("is_live_cloud_credential"):
+            boost = _SECRET_CONFIRMED_BOOST
+            return boost, f"high-impact class 'secret-exposure' - confirmed live credential (+{boost})"
+        boost = _SECRET_UNCONFIRMED_BOOST
+        return boost, f"high-impact class 'secret-exposure' - unconfirmed credential kind (+{boost})"
+
+    if category.startswith("bola"):
+        grounding = evidence.get("grounding") or "unowned"
+        boost = _BOLA_GROUNDING_BOOST.get(grounding, _BOLA_DEFAULT_GROUNDING_BOOST)
+        return boost, f"high-impact class 'bola' - ownership grounding '{grounding}' (+{boost})"
+
     for prefix, boost in _IMPACT_BOOSTS:
         if category.startswith(prefix):
             return boost, f"high-impact class '{prefix}' (+{boost})"
@@ -61,7 +92,7 @@ def priority_score(finding) -> float:
     evidence = getattr(finding, "evidence", None) or {}
     category = getattr(finding, "category", "") or ""
 
-    impact, _ = _impact_boost(category)
+    impact, _ = _impact_boost(category, evidence)
     corroboration, _ = _corroboration_boost(evidence)
     return round(base + impact + corroboration, 2)
 
@@ -84,7 +115,7 @@ def rank_findings(findings: list) -> list:
         evidence = getattr(finding, "evidence", None)
         category = getattr(finding, "category", "") or ""
 
-        impact, impact_reason = _impact_boost(category)
+        impact, impact_reason = _impact_boost(category, evidence or {})
         corroboration, corr_reason = _corroboration_boost(evidence or {})
         priority = round(base + impact + corroboration, 2)
 

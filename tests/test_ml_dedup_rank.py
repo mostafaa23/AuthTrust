@@ -108,3 +108,52 @@ def test_rank_boost_never_overtakes_severity_gap():
     low_cred = _finding("https://x/low", "secret-exposure-aws", 0.3, severity="low")  # base 0.9 +1.5
     out = rank_findings([low_cred, critical])
     assert out[0].asset == "https://x/crit"
+
+
+# --- contextual risk scoring (secret-exposure / bola) -----------------------
+
+
+def test_secret_exposure_confirmed_credential_outranks_unconfirmed():
+    # Same category, severity and confidence; only the evidence differs.
+    confirmed = _finding(
+        "https://x/aws", "secret-exposure-aws-access-key-id", 0.8, severity="critical",
+        evidence={"is_live_cloud_credential": True},
+    )
+    unconfirmed = _finding(
+        "https://x/jwt", "secret-exposure-jwt", 0.8, severity="critical",
+        evidence={"is_live_cloud_credential": False},
+    )
+    assert priority_score(confirmed) > priority_score(unconfirmed)
+
+
+def test_secret_exposure_boost_present_even_without_evidence_flag():
+    # No is_live_cloud_credential key at all (older finding shape) still gets
+    # the weaker boost, not zero - it must not regress to "no boost at all".
+    base = _finding("https://x/a", "cors-weak", 0.8, severity="high")
+    secret = _finding("https://x/b", "secret-exposure-generic-api-key", 0.8, severity="high")
+    assert priority_score(secret) > priority_score(base)
+
+
+def test_bola_boost_scales_with_ownership_grounding():
+    observed = _finding(
+        "https://x/obs", "bola-cross-tenant", 0.8, severity="high",
+        evidence={"grounding": "observed"},
+    )
+    seeded = _finding(
+        "https://x/seed", "bola-cross-tenant", 0.8, severity="high",
+        evidence={"grounding": "seeded"},
+    )
+    unowned = _finding(
+        "https://x/unow", "bola-cross-tenant", 0.8, severity="high",
+        evidence={"grounding": "unowned"},
+    )
+    assert priority_score(observed) > priority_score(seeded) > priority_score(unowned)
+
+
+def test_bola_without_grounding_evidence_defaults_to_weakest_boost():
+    unowned = _finding(
+        "https://x/unow", "bola-cross-tenant", 0.8, severity="high",
+        evidence={"grounding": "unowned"},
+    )
+    no_grounding = _finding("https://x/none", "bola-cross-tenant", 0.8, severity="high")
+    assert priority_score(no_grounding) == priority_score(unowned)
