@@ -1,27 +1,15 @@
 """Mandatory, centralized HTTP layer for every scanner.
 
-Every request must go through here, no exceptions: ScopeManager and
-AdaptiveRateLimiter are required at construction time (never optional),
-so no scanner can route around scope policy by rolling its own HTTP
-client.
+``ScopeManager`` and ``AdaptiveRateLimiter`` are required at construction
+time (never optional), so no scanner can route around scope policy with
+its own HTTP client.
 
-Supports:
-  - GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS
-  - configurable timeouts
-  - bounded retries + exponential backoff + jitter for 429 (idempotent
-    methods only)
-  - the Retry-After header
-  - safe redirect handling: each hop is checked against scope before it
-    is followed, and the chain stops and refuses if any hop lands outside
-    scope
-  - an IP-safety guard: the hostname of every request *and* every
-    redirect hop is resolved and checked against private/loopback/
-    link-local/metadata address ranges before connecting - so even a
-    hostname that is legitimately in scope can never be used to reach an
-    internal address via DNS (e.g. a target domain that resolves, or is
-    made to resolve, to 169.254.169.254)
-  - clear exceptions (ScopeError from core.scope_manager, HttpEngineError,
-    HttpTimeoutError defined here)
+Every hop - including redirects - is checked against scope and against a
+private/loopback/link-local/metadata IP-safety guard before connecting,
+so a target domain that resolves (or is made to resolve) to an internal
+address like 169.254.169.254 is refused even if the hostname is in scope.
+Also handles bounded retry/backoff with jitter on 429 for idempotent
+methods, honoring ``Retry-After``.
 """
 
 from __future__ import annotations
@@ -38,7 +26,7 @@ import requests
 
 from wily.core.http_policy import REDIRECT_STATUSES, resolve_redirect
 from wily.core.rate_limiter import AdaptiveRateLimiter
-from wily.core.scope_manager import ScopeError, ScopeManager
+from wily.core.scope_manager import ScopeManager
 
 logger = logging.getLogger("wily.http_engine")
 
@@ -175,8 +163,14 @@ class HttpEngine:
                 safe = False  # an unresolvable host is not a safe host
             else:
                 for info in infos:
+                    # info[4] is the sockaddr; info[4][0] is the address string
+                    # (IPv4 or IPv6). str() keeps the type checker happy about the
+                    # tuple[str, int] | tuple[str, int, int, int] union and is a
+                    # no-op at runtime. For IPv6, strip any "%scope" zone id.
+                    sockaddr = info[4]
+                    address = str(sockaddr[0]).split("%")[0]
                     try:
-                        candidate = ipaddress.ip_address(info[4][0].split("%")[0])
+                        candidate = ipaddress.ip_address(address)
                     except ValueError:
                         safe = False
                         break

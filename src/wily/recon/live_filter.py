@@ -1,28 +1,12 @@
-"""HTTPX-style live-asset filtering (Phase 4, the "light ML" layer).
+"""Live-asset filtering: dedup and liveness-probe discovered endpoints
+before the orchestrator spends scan budget on them.
 
-Before the orchestrator spends real scanner budget on a list of discovered /
-imported endpoints, it runs them through this filter to cut three kinds of
-waste:
-
-  1. Exact duplicates - the same endpoint reached by several discovery sources
-     (docs + JS + import) that normalise to one canonical URL.
-  2. Near-identical duplicates - the same route with a different object id in a
-     path segment (``/users/1`` vs ``/users/42``). For the per-endpoint scan
-     loop these are the *same* endpoint; one representative is enough.
-  3. Clearly-dead endpoints - optionally, a cheap liveness probe (HEAD, GET
-     fallback) drops hosts that don't answer at all.
-
-Design: the normalisation / dedup logic is a set of **pure functions** with no
-I/O (easy to unit-test, offline, deterministic). The one function that touches
-the network, :func:`filter_live_assets`, takes an injected ``http_engine`` so
-every network call still goes through the shared, scope-enforcing
-:class:`~wily.scanners.http_engine.HttpEngine`, and so tests can drive it with a
-fake engine. The probe is **opt-in** (``probe=False`` by default); dedup always
-runs because it is free.
-
-This is deliberately heuristic - no model, no training. It is the "filter the
-asset list down to live, distinct targets" step every recon chain (httpx, nuclei)
-does before the expensive stage.
+Drops exact duplicate URLs, near-identical routes differing only in an
+object-id path segment (``/users/1`` vs ``/users/42``), and - optionally -
+dead hosts via a cheap HEAD/GET liveness probe. Dedup is pure/offline and
+always runs; the probe is opt-in (``probe=False`` by default) and goes
+through an injected ``http_engine`` so it stays scope-enforced and
+testable with a fake engine.
 """
 
 from __future__ import annotations

@@ -1,41 +1,16 @@
-"""IAM Over-Privilege / Privilege Escalation.
+"""IAM over-privilege / privilege-escalation path finder.
 
-Different from every other Wily module: no HTTP requests at all. The
-input is a single JSON file produced by one read-only command:
+Unlike every other scanner, makes no HTTP requests: the input is the JSON
+output of ``aws iam get-account-authorization-details`` (a single
+read-only call), loaded into dataclasses and built into a permission graph
+(``build_privesc_graph``) that ``find_privesc_paths`` walks for known
+escalation edges (self-mutation, PassRole chains, trust-policy abuse,
+resource hijacks).
 
-    aws iam get-account-authorization-details
-
-(the same data source PMapper uses - not repeated API calls.)
-
-Structure:
-  IAM Collector (load_authorization_details) -> load the JSON into dataclasses
-  Policy Parser (parsing logic lives inside the dataclasses themselves)
-  Permission Graph Engine (build_privesc_graph) -> networkx.DiGraph
-  Privilege Escalation Analyzer (find_privesc_paths)
-  IAM Findings (the same shared Finding class)
-
-Important scope note (same as PMapper/nhi-hunter): v0.1 covers
-identity-to-identity edges only (escalation via IAM directly), not
-resource-based policies (S3 bucket policies, KMS key policies, ...) -
-that is a separate TODO for later.
-
-TODO (v0.2+):
-  - Apply Explicit Deny + SCPs + Permissions Boundary before treating any
-    edge as "effective" (v0.1 assumes the absence of these restrictions,
-    to validate the graph logic first).
-  - Multi-hop path chaining (today one edge = one finding; chains such as
-    AddUserToGroup -> group's PassRole are not yet stitched together).
-  - Resource-based policy edges (S3/KMS/SNS/SQS/Secrets Manager), which
-    the identity-only graph still does not model.
-
-Covered as of this revision (Rhino Security Labs' 28-method catalog):
-self-mutation (#1-13), PassRole->EC2/Lambda/Glue/ECS/CloudFormation/
-DataPipeline/SageMaker/CodeStar, Trust-Policy Abuse (#14,
-iam:UpdateAssumeRolePolicy+sts:AssumeRole), and single-permission
-Resource Hijack (#18 lambda:UpdateFunctionCode, #26
-lambda:UpdateFunctionConfiguration, #20 glue:UpdateDevEndpoint, #28
-sagemaker:CreatePresignedNotebookInstanceUrl, #23
-codestar:CreateProjectFromTemplate).
+Scope: identity-to-identity edges only - resource-based policies (S3/KMS
+bucket and key policies) are not modeled, and Explicit Deny/SCPs/
+Permissions Boundaries are not yet applied, so an edge is "possible", not
+confirmed-effective.
 """
 
 from __future__ import annotations

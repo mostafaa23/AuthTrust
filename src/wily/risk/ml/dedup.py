@@ -1,19 +1,11 @@
-"""Near-duplicate finding clustering (Phase 4, the "light ML" layer).
+"""Near-duplicate finding clustering.
 
-Runs *after* ``rules_engine.apply_deterministic_rules`` has already removed
-**exact** duplicates (same asset + category + technique + method). This pass
-catches the softer case that exact-keying misses: two findings about the *same
-asset and category* whose evidence is near-identical - e.g. the same issue
-reported by two discovery sources with slightly different wording, or the same
-check firing twice with a marginally different snippet.
-
-Deliberately heuristic, not a model: it clusters by ``(asset, category)`` and
-collapses members whose evidence is textually very similar (difflib ratio above
-a threshold). There is no training and nothing to learn - the design contract
-from ``rules_engine`` still holds here: **never drop a genuinely distinct
-finding**. When two findings collapse, the higher-confidence copy is kept and a
-``duplicate_count`` is recorded on it, so the ranker and the report can show
-that an issue was corroborated rather than quietly losing the signal.
+Runs after ``rules_engine.apply_deterministic_rules`` has removed exact
+duplicates. Catches the softer case: findings for the same
+``(asset, category)`` whose evidence text is near-identical (difflib
+ratio above a threshold) get collapsed, keeping the higher-confidence
+copy and recording ``duplicate_count`` on it. Never drops a genuinely
+distinct finding.
 """
 
 from __future__ import annotations

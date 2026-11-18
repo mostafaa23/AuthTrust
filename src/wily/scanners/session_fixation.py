@@ -1,44 +1,17 @@
-"""Session-fixation scanner (OWASP A07 - Identification and Authentication
-Failures).
+"""Session-fixation scanner (OWASP A07).
 
-The check, in three steps (same recipe as Vaile's session-fixation module,
-github.com/Prodject/Vaile):
-  1. ``GET`` the login page anonymously and capture whatever session
-     cookie it sets.
-  2. ``POST`` valid credentials, sending that *same* pre-login cookie
-     along with the request (exactly what a victim who was handed a
-     pre-authenticated link/cookie by an attacker would do).
-  3. Compare the session cookie's value after login to its value before
-     login. If it is unchanged - the server never rotated the session
-     identifier on privilege change - the pre-login value is still valid
-     post-login, which is the textbook session-fixation exploit: an
-     attacker who fixes a victim's session cookie before they log in
-     inherits their authenticated session afterward.
+Captures the session cookie from an anonymous GET of the login page, logs
+in while still sending that pre-login cookie, then checks whether the
+cookie's value is unchanged afterward - if so, the server never rotates
+the session ID on login, so an attacker who fixes a victim's cookie before
+they authenticate inherits their session.
 
-Telling a session cookie from a tracking cookie
----------------------------------------------------
-A response often sets several cookies (analytics, language/theme
-preference, consent banners, ...) that have nothing to do with
-authentication state and would be pure noise to compare. A cookie is
-treated as *sensitive* (worth comparing) when either is true:
-  * its name matches a known session-identifier pattern
-    (``session_id``, ``JSESSIONID``, ``PHPSESSID``, ``connect.sid``,
-    ``sid``, ...), or
-  * it is marked ``HttpOnly`` - a cookie flagged HttpOnly is, by
-    definition, meant to carry something the server doesn't want
-    JavaScript touching, which in practice means session/auth state far
-    more often than a tracking pixel ID.
-A small denylist of common tracking/preference cookie names
-(``_ga``, ``_gid``, ``language``, ...) is also excluded even if one of
-them happens to collide with the HttpOnly check, to keep the common cases
-honest.
+Only cookies that look like session identifiers (name pattern, or
+HttpOnly - minus a small tracking-cookie denylist) are compared, to avoid
+noise from analytics/preference cookies.
 
-Safety
-------
-One anonymous GET and one login POST with credentials the tester already
-supplied - no different from logging in once, normally. Read-only in the
-sense that matters here: no destructive action, no repeated/noisy probing.
-No confirmation flag is required.
+Safety: one anonymous GET and one login POST with tester-supplied
+credentials, no different from a normal login. No confirmation flag needed.
 """
 
 from __future__ import annotations

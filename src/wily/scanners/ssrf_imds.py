@@ -1,29 +1,15 @@
-"""Cloud IMDS SSRF.
+"""Cloud IMDS SSRF scanner.
 
-v0.1 - two levels out of 4 agreed in the design:
-  1. imds_v1_direct : the direct IMDSv1 path - a real two-step chain
-     (list role name -> fetch credentials by that name), the same shape
-     as the actual Capital One incident attack, not a single request.
-  2. ip_bypass      : the same chain, using alternate IP encodings
-     (decimal, hex, nip.io) to evade naive WAF filters that do a literal
-     string match on "169.254.169.254" only.
+Drives a real two-step IMDS chain (list role name -> fetch credentials by
+that name, the same shape as the Capital One incident), across IMDSv1
+direct, alternate IP encodings (decimal/hex/nip.io, to catch naive WAF
+filters), IMDSv2's token handshake, and blind SSRF via OOB canary
+(``core/oob_canary.py``). A finding requires real credential markers
+(AccessKeyId, SecretAccessKey) in the response, not just a status code.
 
-Evidence/validation: the response is searched for real markers
-(AccessKeyId, SecretAccessKey) after the full chain completes - not just
-a status code.
-
-requires_owned_infra = True: this scanner must only run against
-infrastructure the tester actually owns (the target itself has the
-SSRF-prone parameter). The scanner refuses to run unless the caller
-explicitly confirms this via ``confirm_owned_infra=True``.
-
-TODO (v0.2+):
-  - Level 3: IMDSv2 (PUT /latest/api/token + X-aws-ec2-metadata-token-ttl-seconds
-    -> GET with X-aws-ec2-metadata-token) - implemented below.
-  - Level 4: Blind SSRF via OOB canary (core/oob_canary.py, the same one
-    used for jku_injection) - implemented below.
-  - DNS rebinding (nccgroup/singularity) - a fully separate piece of
-    infrastructure, deliberately deferred, not in scope for v0.1.
+Safety: ``requires_owned_infra`` - refuses to run unless the caller passes
+``confirm_owned_infra=True``, since this must only target infrastructure
+the tester actually owns.
 """
 
 from __future__ import annotations

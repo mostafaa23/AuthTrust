@@ -1,42 +1,16 @@
 """Timing-attack account-enumeration scanner.
 
-Many login / forgot-password / registration endpoints answer "invalid
-credentials" either way, but take a measurably different amount of time
-depending on whether the username/email actually exists (a DB lookup that
-short-circuits, a bcrypt hash that only runs for a real account, ...).
-That timing side channel lets an attacker enumerate valid accounts without
-ever seeing a different status code or body - the same class of bug
-timing-attack-checker (github.com/pentestmonkey/timing-attack-checker)
-targets.
+Many login/forgot-password endpoints answer "invalid credentials" either
+way but take measurably different time depending on whether the account
+actually exists. This builds a timing baseline from known-invalid
+usernames, probes each candidate the same number of times (default 5, to
+average out network/scheduler noise), and flags a candidate whose mean
+response time is a statistically significant outlier against that
+baseline. Never attempts a correct password - only latency is measured.
 
-Design, in one sentence
-------------------------
-Build a timing *baseline* from several usernames the tester supplies as
-known-invalid, probe each candidate username the same number of times,
-and flag a candidate whose mean response time is a statistically
-significant outlier against that baseline (anomaly detection against a
-learned "normal" distribution, not a fixed threshold - network jitter
-differs by target, so a fixed millisecond cutoff would be both too
-sensitive and too lax depending on where it runs).
-
-Why probes_per_item defaults to 5
------------------------------------
-A single request's timing is dominated by network/scheduler noise, not
-the backend's actual work. Averaging a handful of probes (the backlog's
-own number, chosen to "cut network noise" without turning this into a
-large request burst) is the cheapest way to get a usable signal without
-needing dozens of requests per candidate.
-
-Safety: opt-in, like every other repeated-probe scanner
-----------------------------------------------------------
-This sends several authentication attempts per username (baseline +
-candidates) to a live auth endpoint - exactly the kind of traffic that can
-trip a lockout policy or a WAF rate limiter, so it requires explicit
-``confirm_timing_probe=True`` (the ``--confirm-timing-probe`` CLI flag),
-same opt-in pattern as ``TokenEntropyScanner.confirm_deep_analysis`` and
-``BolaTester.allow_destructive``. It never attempts a *correct* password -
-only wrong-but-plausible credentials - so it can never actually log in as
-anyone; the only thing being measured is response latency.
+Safety: sends several auth attempts per username to a live endpoint, which
+can trip lockouts/WAFs, so it requires ``confirm_timing_probe=True``
+(``--confirm-timing-probe``).
 """
 
 from __future__ import annotations

@@ -1,32 +1,15 @@
 """S3 bucket misconfiguration scanner.
 
-Given a bucket reference (a bare name, an ``s3://bucket/key`` URI, or a
-``*.s3*.amazonaws.com`` URL) this checks the classic public-access failures:
+Given a bucket reference (bare name, ``s3://bucket/key``, or
+``*.s3*.amazonaws.com`` URL), checks for public bucket listing, public
+object read, and ACL/policy exposure granting ``AllUsers``/
+``AuthenticatedUsers`` access.
 
-  * public bucket **listing** - anonymous ``GET`` on the bucket root returns a
-    ``<ListBucketResult>`` (every key is enumerable by anyone).
-  * public **object read** - a known object is readable with no credentials.
-  * **ACL / policy exposure** - the bucket ACL or policy is itself readable
-    anonymously, and may grant ``READ``/``WRITE`` to the ``AllUsers`` /
-    ``AuthenticatedUsers`` groups.
-
-Safety: read-only, write/delete is permission-check only
---------------------------------------------------------
-Every request this scanner sends is a **read** (``GET``). It never issues a
-``PUT``/``DELETE`` and so can never create, overwrite or delete an object on an
-arbitrary third-party bucket - the project runs against random targets, so a
-real mutating probe is off the table by construction (see the project vision's
-SAFETY note).
-
-"Would an unauthenticated write be accepted?" is still answered, but from a
-**safe signal**: the bucket's own ACL / policy is read and inspected for a
-``WRITE``/``WRITE_ACP`` grant to ``AllUsers``/``AuthenticatedUsers`` (ACL) or an
-``s3:PutObject``/``s3:DeleteObject`` allow for a wildcard principal (policy).
-That infers write/delete exposure without ever performing one. Reporting this
-inference is gated behind ``confirm_writes`` (the ``--confirm-s3-writes`` CLI
-flag), default off, mirroring the ``confirm_destructive`` / ``requires_owned_infra``
-pattern the other scanners use: even though the probe itself is a harmless read,
-concluding "this bucket is publicly writable" is opt-in.
+Safety: every request is a GET - never a PUT/DELETE, so it can never
+mutate a third-party bucket. Write/delete exposure is only *inferred* from
+a readable ACL/policy granting a wildcard principal write access, and
+reporting that inference is gated behind ``confirm_writes``
+(``--confirm-s3-writes``), default off.
 """
 
 from __future__ import annotations

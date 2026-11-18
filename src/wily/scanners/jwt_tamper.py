@@ -1,21 +1,10 @@
-"""IdP & JWT Tampering.
+"""IdP & JWT tampering scanner.
 
-v0.3 - JWT checks:
-  1. alg_none              : header.alg -> "none" (every letter-case variant) + strip the signature.
-  2. signature_stripped    : the same header/payload, only the signature removed.
-  3. jwk_header_injection  : sign the token with a locally generated RSA key,
-     embedding the public key inside a "jwk" header - detects servers that
-     trust an attached key instead of their own fixed key.
-  4. rs256_hs256_confusion : sign with HS256 using the known RS256 public
-     key as the HMAC secret (requires known_public_key_pem from the user).
-  5. expiry_claim_analysis : check whether exp is present and valid, and
-     the token's lifetime.
-
-TODO (deferred until the canary infrastructure built for the SSRF/IMDS
-module is also wired in here):
-  - kid header injection (path traversal / SQLi in the kid value) - active mode.
-  - jku/x5u header injection (needs a canary like IMDS SSRF) - active mode.
-  - missing aud/iss validation.
+Checks: ``alg: none`` (all case variants) with the signature stripped;
+signature-stripped-only; JWK header injection (sign with a locally
+generated key, embed its public half in the ``jwk`` header, to catch
+servers that trust an attached key over their own); RS256/HS256 key
+confusion (requires a known public key PEM); and expiry-claim analysis.
 """
 
 from __future__ import annotations

@@ -1,25 +1,12 @@
-"""Finding prioritisation / ranking (Phase 4, the "light ML" layer).
+"""Finding prioritisation / ranking.
 
-Orders the findings for the report. Deliberately heuristic - no model, no
-training. The base signal is the same ``risk_score`` the rest of Wily uses
-(severity x confidence, see ``risk/scoring.py``); on top of it this pass adds a
-few small, explainable boosts so that, among findings of comparable base risk,
-the ones that matter most to an operator float to the top:
-
-  - **Impact class** - credential exposure, public buckets, SSRF/IMDS, IAM
-    privesc, cross-tenant access (BOLA) and resource takeover are the findings
-    that chain into real compromise, so they get a small lift over, say, a
-    missing-header CORS note of the same base score.
-  - **Corroboration** - a finding that near-duplicate clustering merged
-    (``duplicate_count`` > 1) was seen more than once, so it is slightly less
-    likely to be noise.
-
-The boosts are intentionally small (sub-severity) so they only ever break ties
-and nudge ordering; they never let a low-severity finding leapfrog a genuinely
-critical one. Every boost is recorded in ``evidence['rank_reasons']`` and the
-final priority in ``evidence['rank_score']`` so the report can explain *why* a
-finding ranks where it does - this module assists the analyst, it does not
-declare anything confirmed on its own.
+Orders findings for the report. Heuristic, not a trained model: starts
+from the existing ``risk_score`` (severity x confidence) and adds small
+tie-breaking boosts for high-impact classes (credential exposure, public
+buckets, SSRF/IMDS, IAM privesc, BOLA, takeover) and for findings
+corroborated by duplicate clustering. Boosts are sub-severity, so they
+only reorder ties and never let a low-severity finding outrank a critical
+one. Recorded per-finding in ``evidence['rank_reasons']``/``rank_score``.
 """
 
 from __future__ import annotations

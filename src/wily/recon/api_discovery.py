@@ -1,55 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Wily :: wily/api_discovery.py
-=============================
-Black-box API endpoint discovery pipeline (Module 1 of the Wily scanner).
+"""Black-box API endpoint discovery pipeline.
 
-Fallback order (STRICT)
------------------------
-  0. User-provided spec .... An OpenAPI/Swagger spec (local file or URL) or a
-                             direct API endpoint is used as-is; discovery is
-                             skipped unless ``augment=True`` (see ``--augment``).
-  1. Documentation probes .. Common hidden docs paths on the target
-                             (/swagger.json, /openapi.yaml, /api-docs, ...).
-  2. JavaScript scraping .... Fetch the homepage, extract <script src>,
-                             modulepreload and webpack chunk references,
-                             download the JS and regex-mine API endpoints,
-                             including full absolute URLs and template paths.
-  3. Smart fuzzing .......... If the harvest is thin (< fuzz_threshold), probe
-                             a built-in, lightweight wordlist of common API
-                             routes. Non-destructive: GET/HEAD only, no
-                             payloads. A soft-404 / WAF baseline is sampled
-                             first so blanket responses do not pollute results.
+Falls back through increasingly active sources until enough endpoints are
+found: a user-provided OpenAPI/Swagger spec, then common docs paths
+(/swagger.json, /api-docs, ...), then JS-scraped routes, then a built-in
+wordlist probe. Non-destructive throughout: GET/HEAD only, no payloads.
 
-Design principles
------------------
-* Fully asynchronous (aiohttp), bounded concurrency (semaphore) with an
-  optional token-bucket rate limiter, per-request timeouts and defensive
-  error handling - a single failure never aborts the pipeline.
-* Non-destructive by construction: only GET/HEAD requests are issued,
-  no fuzzy payloads, no state-changing verbs.
-* Output is a clean, deterministic JSON map (see ``DiscoveryReport.to_json``).
+    from wily.recon.api_discovery import ApiDiscoveryPipeline, DiscoveryConfig
+    report = await ApiDiscoveryPipeline(DiscoveryConfig(target=url)).run()
 
-Library integration
--------------------
-    from wily.api_discovery import ApiDiscoveryPipeline, DiscoveryConfig
-
-    cfg = DiscoveryConfig(target="https://example.com")
-    report = await ApiDiscoveryPipeline(cfg).run()
-    payload = report.to_json()          # plain dict, JSON-serializable
-
-CLI
----
-    python -m wily.api_discovery https://example.com --output report.json
-    python -m wily.api_discovery https://example.com --spec ./openapi.json
-    python -m wily.api_discovery https://example.com --aggressive -v
-
-Notes
------
-* YAML specs require PyYAML (``pip install PyYAML``); JSON specs always work.
-* "Same site" matching is a pragmatic eTLD+1 heuristic (no Public Suffix
-  List); tune via ``DiscoveryConfig`` / the CLI flags if your scope differs.
+YAML specs require PyYAML; JSON specs always work.
 """
 
 from __future__ import annotations
@@ -648,14 +609,9 @@ class DiscoveryReport:
     ) -> None:
         """Add or merge an endpoint, keyed by its canonical URL.
 
-        ``details`` is an optional free-form payload (query/body/path params,
-        auth info, a request/response sample, ...), populated by the
-        traffic-monitoring stage and, now, by spec-sourced operations too. It
-        is merged shallowly, with list-valued sub-keys ("query_params",
-        "body_params", "path_param_positions") unioned so an endpoint seen
-        across several sources (e.g. in both the spec and live traffic)
-        accumulates detail from all of them instead of the second source
-        being silently dropped.
+        List-valued ``details`` keys (query/body/path params) are unioned on
+        merge, so an endpoint seen across multiple sources keeps detail from
+        all of them instead of the later source overwriting the earlier one.
         """
         key = canonical_url(url)
         if not key:
@@ -840,7 +796,7 @@ class ApiDiscoveryPipeline:
             else:
                 for info in infos:
                     try:
-                        candidate = ipaddress.ip_address(info[4][0].split("%")[0])
+                        candidate = ipaddress.ip_address(str(info[4][0]).split("%")[0])
                     except ValueError:
                         safe = False
                         break

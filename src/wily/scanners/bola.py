@@ -1,113 +1,32 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Wily :: wily/bola_tester.py
-============================
-Stage 5: cross-identity BOLA / Multi-Tenant / Cross-Tenant Access testing.
+"""Cross-identity BOLA / multi-tenant access testing.
 
-Where Stage 0-4 (api_discovery.py, traffic_monitor.py) only ever answer
-"does this endpoint exist and respond", this stage answers the actual
-security question: *does the server enforce who is allowed to see it*.
+Replays each candidate resource as a different identity than the one that
+owns (or plausibly owns) it, and compares the two responses on more than a
+status code: size delta, JSON-structure (Jaccard) similarity, and a "200
+with an error body" sniff, combined into a HIGH/MEDIUM/LOW/NONE verdict.
 
-Design, in one sentence
-------------------------
-For every candidate resource we know one identity legitimately owns, replay
-the exact same request as a different identity and compare the two
-responses with more than a status code - the same core idea as Burp's
-Autorize/AuthMatrix and the standalone ``bola`` CLI (github.com/Mutasem-mk4/
-bola), whose confidence-scoring approach this module's ``compare()``
-deliberately follows: status match + response-size delta + JSON-structure
-(Jaccard) similarity + a "200 with an error body" sniff, combined into a
-HIGH/MEDIUM/LOW/NONE verdict instead of trusting any single signal alone.
+Confidence is capped by how the candidate's ownership was established:
+HIGH only for an owner directly observed via traffic monitoring; MEDIUM for
+an owner inferred from a JWT claim seeded into a templated URL, or for an
+unowned candidate flagged only because more than one identity got a
+matching response. The owner's own baseline is sampled three times so
+volatile fields (timestamps, nonces, CSRF tokens) can be excluded from the
+comparison instead of producing false positives/negatives; if the baseline
+itself doesn't agree across samples, confidence is forced down to LOW.
 
-Three candidate classes, three confidence ceilings
-----------------------------------------------------
-* **Owned candidates** - a resource captured by ``traffic_monitor.py`` while
-  ``TrafficConfig.identity_name`` was set, so we *know* whose it is (directly
-  observed, not inferred). Tested against every *other* identity. This is
-  real Cross-Tenant/BOLA testing and can reach HIGH confidence.
-* **Seeded candidates** - a templated endpoint straight from a spec or JS
-  scrape (``/users/{id}``, never seen live) that we can now render: if an
-  identity's bearer token is a JWT, ``Identity`` harvests its claims
-  (``sub``, ``user_id``, ``email``, ...) as seed values at construction time,
-  and any ``{param}`` whose *name* looks like an object/tenant reference
-  (shared ``PARAM_NAME_ID_MARKER`` from api_discovery.py) gets substituted
-  with that identity's own claim - never guessed, never enumerated. The
-  identity is then the presumed owner of that concrete URL. Presumed, not
-  observed, is the operative word: ownership here rests on the assumption
-  that a token's own claims describe the token holder's own resource, which
-  is usually true but not guaranteed - so this class is capped at MEDIUM,
-  the same ceiling as unowned candidates, never HIGH.
-* **Unowned candidates** - a ``bola_candidate`` endpoint with no owner at all
-  (traffic captured with no identity stamped, and no JWT seed could render
-  it). The best this module can honestly do is request it with every
-  identity supplied and flag it (capped at MEDIUM) if more than one gets a
-  matching, non-error response - "possible shared access, ownership
-  unconfirmed", not a confirmed finding. Run Stage 4 once per identity (see
-  ``TrafficConfig.identity_name``) to turn these into directly-owned
-  candidates instead.
+Safety: GET/HEAD replays only unless ``allow_destructive=True``; requires
+an explicit, checked ``ScopeManager``; rate-limited and concurrency-bounded.
 
-A templated endpoint with a placeholder that *isn't* id-shaped (``/api/
-{version}/items``) is still never rendered - only id/tenant-shaped names are
-ever substituted, and only with a value an identity's own token actually
-claims.
-
-Owner-baseline volatility and stability
------------------------------------------
-Before scoring an **owned** candidate (observed or seeded), the owner's own
-request is sampled three times rather than once. Two things come out of
-that:
-
-* **Volatility diffing** - JSON key-paths whose *value* changes across the
-  three identical, same-identity calls (timestamps, nonces, request IDs,
-  rotating CSRF tokens, ...) are excluded from the Jaccard structural
-  comparison. Without this, a perfectly correctly-scoped endpoint can look
-  "different" between owner and other purely because of a timestamp field,
-  producing a false LOW/NONE; or, more dangerously, a genuinely leaked
-  record can look "more similar than it should" skew the other direction if
-  volatile fields happen to coincide. Comparing on the *stable* fields only
-  is what both directions of error need.
-* **Stability check** - if the owner's own three baseline calls don't even
-  agree with *each other* (status flaps, or the body is too unstable to
-  trust even after excluding known-volatile fields), the endpoint itself is
-  too noisy to draw a conclusion from. Rather than silently skip it (and
-  lose visibility that something's odd), the comparison still runs but its
-  confidence is forced down to at most LOW, with a note explaining why - an
-  unstable baseline is not evidence of anything, in either direction.
-
-Safety
-------
-* GET/HEAD replays only by default. A candidate whose only known method is
-  state-changing (POST/PUT/PATCH/DELETE) is reported as "needs confirmation"
-  rather than replayed, unless ``allow_destructive=True`` - the same opt-in
-  pattern already used for S3 write-checks and token-entropy probing
-  elsewhere in Wily.
-* Replays never follow redirects and require an explicit ``ScopeManager``.
-  Every URL is checked immediately before sending; missing or out-of-scope
-  URLs fail closed.
-* Rate-limited and concurrency-bounded, same philosophy as the discovery
-  stages: a scanner should never itself become a denial-of-service source.
-
-Library integration
---------------------
-    from wily.api_discovery import ApiDiscoveryPipeline, DiscoveryConfig
-    from wily.bola_tester import BolaTester, Identity
-    from wily.target_scope_manager.scope_manager import ScopeManager
+    from wily.recon.api_discovery import ApiDiscoveryPipeline, DiscoveryConfig
+    from wily.scanners.bola import BolaTester, Identity
+    from wily.core.scope_manager import ScopeManager
 
     scope = ScopeManager("example.com")
-    report = await ApiDiscoveryPipeline(
-        DiscoveryConfig(target=url, scope=scope)
-    ).run()
-    tester = BolaTester(
-        [
-        Identity("accountA", {"Authorization": "Bearer <A's token>"}),
-        Identity("accountB", {"Authorization": "Bearer <B's token>"}),
-        ],
-        scope_manager=scope,
-    )
+    report = await ApiDiscoveryPipeline(DiscoveryConfig(target=url, scope=scope)).run()
+    tester = BolaTester([Identity("A", {...}), Identity("B", {...})], scope_manager=scope)
     findings = await tester.run(report)
-    for f in findings:
-        print(f.confidence, f.method, f.endpoint, f.owner_identity, "->", f.tester_identity)
 
 Only test identities and targets you are authorised to use.
 """
@@ -224,13 +143,10 @@ def _harvest_jwt_seed_values(headers: Dict[str, str]) -> Dict[str, str]:
 class Identity:
     """One test account. ``headers`` is sent on every replay for this identity.
 
-    ``seed_values`` maps an id-shaped field name (``"id"``, ``"user_id"``,
-    ``"sub"``, ...) to a concrete value for this identity - used to render
-    templated endpoints like ``/users/{id}`` that were never seen live (see
-    ``render_templated_url``). Auto-harvested from the Authorization bearer
-    token's own JWT claims when possible; pass your own (or add to it after
-    construction) to cover a non-JWT token or a project-specific claim name -
-    caller-supplied values always win over harvested ones.
+    ``seed_values`` maps an id-shaped field name to a concrete value, used
+    to render templated endpoints like ``/users/{id}`` (see
+    ``render_templated_url``). Auto-harvested from the bearer token's JWT
+    claims when possible; caller-supplied values win over harvested ones.
     """
 
     name: str
@@ -422,23 +338,13 @@ def render_templated_url(url: str, seed_values: Dict[str, str]) -> Optional[str]
     """Substitute every ``{param}`` in ``url`` using ``seed_values``, or
     return ``None`` if it can't be done safely.
 
-    Two things make this safe rather than a guess: every placeholder in the
-    URL must look like an object/tenant reference by *name*
-    (``PARAM_NAME_ID_MARKER``, the same regex api_discovery.py uses) - a
-    non-id placeholder such as ``{version}`` aborts the whole render, nothing
-    partial is returned - and every id-shaped placeholder must resolve to an
-    actual seed value (never a placeholder or empty string standing in for
-    one).
-
-    Matching order per placeholder: the seed_values key by its exact name,
-    then lowercase, then snake_case (a spec's ``{userId}`` and a JWT's
-    ``user_id`` claim don't always agree on casing) - and only for a *bare*
-    id placeholder (``_GENERIC_ID_PLACEHOLDER``: ``id``, ``uuid``, ``userId``,
-    ... - never ``tenantId``/``accountId``/etc, which name a different
-    entity), a last fallback to the JWT ``sub`` claim: by RFC 7519, ``sub``
-    *is* the token holder's own canonical identifier, so ``{id}``/``{userId}``
-    almost always means "this identity's own ID" even when the token has no
-    claim literally called ``id``.
+    Every placeholder must look like an object/tenant reference by name
+    (``PARAM_NAME_ID_MARKER``); a non-id placeholder like ``{version}``
+    aborts the whole render rather than returning a partial result. Seed
+    lookup tries the exact name, then lowercase, then snake_case; a bare
+    id placeholder (``id``, ``uuid``, ``userId``, ... - never
+    ``tenantId``/``accountId``) also falls back to the JWT ``sub`` claim,
+    which per RFC 7519 is the token holder's own canonical identifier.
     """
     out = url
     for match in _TEMPLATE_PARAM.finditer(url):
@@ -461,13 +367,10 @@ def render_templated_url(url: str, seed_values: Dict[str, str]) -> Optional[str]
 def check_baseline_stability(statuses: List[Optional[int]], volatile_key_count: int, total_key_count: int) -> Tuple[bool, List[str]]:
     """Is the owner's own repeated baseline trustworthy enough to score against?
 
-    Two independent red flags, either one enough to call it unstable:
-    the owner's *own* status code isn't even consistent across identical
-    calls (session expiring mid-test, a flaky backend, load-balanced
-    instances disagreeing - any of which would make a mismatch meaningless),
-    or almost the entire body changes between calls (nothing stable left to
-    compare on). A completely empty/non-JSON body (``total_key_count == 0``)
-    is judged on status alone - there's no "volatile fraction" to compute.
+    Unstable if the owner's own status code is inconsistent across
+    identical calls, or if most of the body changes between calls (nothing
+    stable left to compare on). An empty/non-JSON body is judged on status
+    alone.
     """
     notes: List[str] = []
     real_statuses = {s for s in statuses if s is not None}
@@ -493,28 +396,17 @@ def compare(
 ) -> Tuple[str, Optional[float], List[str]]:
     """Multi-factor comparison -> (confidence, json_similarity, notes).
 
-    Mirrors ``bola``'s own scoring recipe: status-code match, response-size
-    delta, JSON structural (Jaccard) similarity, and an error-body sniff,
-    combined rather than trusting any one signal - a size-only or
-    status-only check is exactly what produces the false positives/negatives
-    a reviewer would ask about first.
+    Combines status-code match, response-size delta, JSON structural
+    (Jaccard) similarity and an error-body sniff, rather than trusting any
+    one signal.
 
-    ``grounded`` must be ``True`` only when ``owner`` is a sample taken with
-    a *directly verified* owner's identity (traffic captured with
-    ``identity_name`` set) - **not** merely "a sample happens to be
-    available". A JWT-seeded owner (plausible, but inferred from a claim)
-    also passes ``grounded=False`` for this reason, same ceiling as an
-    unowned candidate; conflating "no baseline at all" with "an unverified
-    baseline" here is exactly the bug that let an unowned match reach HIGH
-    in testing.
-
-    ``exclude_keys`` is normally the owner's own ``detect_volatile_keys()``
-    output: fields that change across repeated owner-only calls (timestamps,
-    nonces, ...) and so shouldn't count for or against a structural match.
-
-    ``baseline_stable=False`` (the owner's own repeated calls didn't agree
-    with each other - see ``check_baseline_stability``) forces the result
-    down to at most LOW: an unstable baseline isn't evidence of anything.
+    ``grounded=True`` only when ``owner`` is a directly-verified owner
+    sample (traffic captured with ``identity_name`` set) - a JWT-seeded or
+    unowned sample must pass ``grounded=False``, or it can wrongly reach
+    HIGH confidence. ``exclude_keys`` (normally the owner's own
+    ``detect_volatile_keys()``) excludes fields that change across repeated
+    owner-only calls. ``baseline_stable=False`` forces the result to at
+    most LOW.
     """
     notes: List[str] = []
     if other.error:
@@ -675,15 +567,10 @@ class BolaTester:
 
     def seed_candidates(self, report: DiscoveryReport) -> List[Tuple[EndpointRecord, str, str, str]]:
         """``(record, method, rendered_url, owner_name)`` for templated
-        ``bola_candidate`` endpoints (``/users/{id}``, never observed live)
-        that at least one identity's own harvested JWT claims let us render
-        into a concrete URL - see ``render_templated_url`` and the module
-        docstring's "Seeded candidates" section. ``owner_name`` is that
-        identity: plausible, not verified.
-
-        One render per endpoint (the first identity whose claims fit) - if
-        several identities could render the same template, that's still one
-        candidate resource to test, not a reason to multiply requests.
+        ``bola_candidate`` endpoints rendered via an identity's own JWT
+        claims (see ``render_templated_url``); ``owner_name`` is plausible,
+        not verified. One render per endpoint - the first identity whose
+        claims fit.
         """
         out: List[Tuple[EndpointRecord, str, str, str]] = []
         for url, record in report.endpoints.items():

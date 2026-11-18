@@ -1,42 +1,14 @@
 """TLS/SSL configuration scanner.
 
-Before this scanner, wily had no dedicated check for the transport layer
-itself - ``classify/router.py`` already names a ``TLS_SERVICE`` asset type
-(a genuine gap flagged while surveying the project), but routed it to no
-scanner at all. This fills that gap.
+Negotiates a handshake under a handful of fixed protocol-version ceilings
+(SSLv3..TLS 1.3), inspects the leaf certificate, and scores the result
+against Mozilla's TLS guidelines (ssl-config.mozilla.org): Modern,
+Intermediate, or Old. Uses stdlib ``ssl`` + ``cryptography`` rather than
+the ``sslyze`` package, to avoid its compiled ``nassl`` dependency.
 
-Design, in one sentence
-------------------------
-Negotiate a handshake with the target host under a handful of fixed
-protocol-version ceilings (SSLv3 .. TLS 1.3), inspect the leaf certificate
-that comes back, and score what was found against Mozilla's TLS
-configuration guidelines (https://ssl-config.mozilla.org/) - "Modern"
-(TLS 1.3 only), "Intermediate" (TLS 1.2+), or "Old" (anything weaker is
-accepted) - the same idea SSLyze (github.com/nabla-c0d3/sslyze) and its
-"scan profile" model are built around.
-
-Why not depend on the ``sslyze`` package itself
--------------------------------------------------
-SSLyze is a full standalone scanner with its own CLI and a compiled
-``nassl`` TLS binding; pulling the whole package in as a library dependency
-just to read "which protocol versions does this host accept" is a heavy
-answer to a narrow question, and it doesn't fit this project's otherwise
-pure-Python dependency footprint (see ``pyproject.toml``). Everything this
-module needs - raw protocol-version handshakes and certificate
-inspection - is available from the standard library's ``ssl`` module plus
-the ``cryptography`` package wily already depends on (for JWT/IAM key
-handling), so that's what this uses. The *idea* (profile against Mozilla's
-levels) is SSLyze's; the implementation is not.
-
-Safety
-------
-Entirely read-only: a handshake and a certificate read, never an HTTP
-request with a body, never a write. No confirmation flag is required.
-The same private/loopback/link-local/metadata IP-safety check
-``HttpEngine`` applies to every HTTP request is applied here before any
-socket is opened, so a target hostname that resolves (or is made to
-resolve) to an internal or cloud-metadata address is refused exactly as it
-would be for any other scanner.
+Safety: read-only (handshake + certificate read, no HTTP body, no write).
+Applies the same private/loopback/metadata IP-safety check as
+``HttpEngine`` before opening any socket. No confirmation flag required.
 """
 
 from __future__ import annotations

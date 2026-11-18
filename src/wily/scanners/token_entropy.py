@@ -1,35 +1,16 @@
-"""Token / session-ID randomness scanner, using *min-entropy* rather than
-Shannon entropy.
+"""Token / session-ID randomness scanner, using min-entropy (NIST SP
+800-90B) rather than Shannon entropy.
 
-Why min-entropy, not Shannon
-----------------------------
-Shannon entropy measures the *average* information content of a source -
-it is a poor fit for "how guessable is this token" because it rewards a
-source that is mostly random but occasionally predictable (the average
-looks fine even though an attacker only needs the easy cases). Min-entropy
-(as used in NIST SP 800-90B) measures the *worst case*: the probability of
-the single most likely outcome, -log2(p_max). That is the right question
-for a security token - "how good is an attacker's best guessing
-strategy", not "what's the average token like". This mirrors the idea
-behind rndSequencer (github.com/KodyMike/rndSequencer).
+Min-entropy scores the worst case (-log2 of the most likely outcome)
+instead of the average, which is the right question for guessability: a
+generator that's mostly random but occasionally predictable still looks
+fine under Shannon entropy.
 
-What this needs, and why it's opt-in
---------------------------------------
-A single token tells you almost nothing about the generator behind it -
-min-entropy is a property of the *distribution* the tokens are drawn from,
-so this scanner needs many samples (``sample_count``, default 30) from the
-same endpoint to say anything meaningful. That means sending many repeated
-requests to whatever endpoint issues the token (a login, a password-reset
-link, a CSRF token, a session cookie) - exactly the kind of repeated,
-potentially rate-limit-tripping traffic the project's safety conventions
-gate behind an explicit opt-in (see ``s3_bucket.py``'s ``confirm_writes``,
-``bola.py``'s ``allow_destructive``). Here that's ``confirm_deep_analysis``
-/ the CLI's ``--deep-token-analysis`` flag.
-
-The scoring itself (``analyze_token_samples``) is a pure function over a
-plain list of strings, so it is fully unit-testable with no network at
-all - the collection step (``TokenEntropyScanner.run``) is the only part
-that needs the opt-in and the HttpEngine.
+Needs many samples (``sample_count``, default 30) from the same endpoint
+to say anything about the underlying distribution, so collection requires
+``confirm_deep_analysis`` (``--deep-token-analysis``) - the repeated
+requests can trip rate limits. The scoring function itself
+(``analyze_token_samples``) is pure and needs no network.
 """
 
 from __future__ import annotations

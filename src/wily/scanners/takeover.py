@@ -1,23 +1,14 @@
 """Subdomain / cloud-resource takeover scanner.
 
-A dangling DNS record - a subdomain whose ``CNAME`` still points at a cloud
-service (an S3 website endpoint, a GitHub Pages site, a Heroku app, ...) that
-has since been de-provisioned - lets an attacker re-register that resource and
-serve content from the victim's subdomain. This scanner detects the *indicator*
-of that state: the host resolves/points to a known provider whose endpoint
-answers with its "unclaimed / no such resource" fingerprint.
+Detects dangling DNS records: a subdomain whose CNAME still points at a
+de-provisioned cloud service (S3 website, GitHub Pages, Heroku, ...),
+which lets an attacker re-register that resource and serve content from
+the victim's subdomain. Correlates the CNAME (against known provider
+suffixes) with the HTTP body served at the host (against that provider's
+"unclaimed" fingerprint).
 
-Detection + fingerprint only
-----------------------------
-The scanner reads two safe signals and correlates them:
-  * the ``CNAME`` (passed in from DNS/discovery, or resolved via an injected
-    resolver), matched against a provider's known CNAME suffixes, and
-  * the HTTP body served at the host, matched against that provider's
-    "unclaimed" fingerprint string.
-
-It **never** registers, claims, or provisions anything - it only observes. A
-match is reported as a takeover *indicator* for an analyst to confirm and
-claim defensively.
+Detection only - never registers, claims, or provisions anything. A match
+is a takeover indicator for an analyst to confirm and claim defensively.
 """
 
 from __future__ import annotations

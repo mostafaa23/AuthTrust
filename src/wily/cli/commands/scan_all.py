@@ -1,25 +1,13 @@
-"""The unified orchestrator: wily scan <domain>
+"""The unified orchestrator: ``wily scan <domain>``.
 
-Runs the following bundle automatically against every endpoint it
-discovers (with no extra input required):
-  - Auth Bypass (missing-authorizer, method-inconsistency, CORS)
-  - SSRF levels 1+2 (direct + IP bypass) against parameters classified
-    url-likely
+Runs Auth Bypass and SSRF levels 1+2 automatically against every endpoint
+it discovers. JWT Tampering, BOLA, IAM Privesc, and blind SSRF (level 4)
+each enable themselves once their required input is supplied (--token,
+--identity, --iam-file, --blind respectively).
 
-And enables the following modules once their required input is supplied:
-  - JWT Tampering          -> --token
-  - BOLA                   -> --identity name=HeaderValue (at least twice)
-  - IAM Privesc             -> --iam-file (fully independent of the domain)
-  - SSRF level 4 (Blind)   -> --blind
-
-Safety gates:
-  - By default, AuthzBypassScanner only tests non-destructive methods
-    (GET/HEAD/OPTIONS). Pass --confirm-destructive to also test
-    POST/PUT/DELETE/PATCH, acknowledging that those requests can mutate
-    or delete real data on the target.
-  - SsrfImdsScanner requires the tester to own the target infrastructure
-    (requires_owned_infra). Pass --confirm-owned-infra to acknowledge
-    that and enable it.
+Safety gates: destructive-method auth-bypass testing needs
+--confirm-destructive; SSRF/IMDS needs --confirm-owned-infra, since it
+must only target infrastructure the tester owns.
 """
 
 from __future__ import annotations

@@ -1,19 +1,10 @@
-"""Shared base for every scanner module (bola, authz_bypass, ssrf_imds,
-iam_privesc, jwt_tamper, ...).
+"""Shared base for every scanner module.
 
-Architectural note: not every scanner is concurrent in the same way. Most
-of them (JWT, Authz, SSRF, IAM) are synchronous (requests + the shared
-HttpEngine). BOLA alone is async (aiohttp + real concurrency across
-multiple identities) - a deliberate decision, not an architectural
-mistake; it is documented in bola.py itself. BaseScanner therefore has no
-strict abstractmethod on run(), so both styles can subclass it without
-breaking either one.
-
-If you need to drive scanners uniformly (e.g. from an orchestrator), use
-run_scanner() below - it detects the run() style and dispatches correctly.
-Note that the current orchestrator (cli/commands/scan_all.py) calls each
-scanner's run() directly rather than through this adapter; keep that in
-mind if you add a gating check here and expect it to apply everywhere.
+Most scanners run synchronously; BOLA alone is async (real concurrency
+across identities), so ``run()`` is deliberately not a strict
+abstractmethod - both styles subclass this without conflict. Use
+``run_scanner()`` to drive either style uniformly; note ``scan_all.py``
+currently calls each scanner's ``run()`` directly instead.
 """
 
 import datetime as _dt

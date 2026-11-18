@@ -1,23 +1,16 @@
-"""Out-of-Band (OOB) Canary Server - a lightweight local HTTP server that
-logs every request it receives, so a scanner can prove a target server
-actually sent an outbound request (jku fetch, SSRF, ...) instead of
-relying only on the ordinary HTTP response from the target endpoint.
+"""Out-of-band (OOB) canary server.
 
-v0.1: fully local (127.0.0.1) - fine for local testing and for targets
-where the scanner and the target server share the same network/machine
-(like our demo). Real-world use against a remote internet domain needs a
-publicly reachable canary (a public IP/domain, or a service like
-interactsh) - the interface (url_for, wait_for_hit) stays the same, only
-the transport changes. TODO for later.
+A lightweight local HTTP server that logs every request it receives, so a
+scanner can prove a target actually sent an outbound request (jku fetch,
+SSRF, ...) rather than relying only on the target's own HTTP response.
 
-Lifecycle: use it as a context manager (`with OOBCanaryServer() as canary:`)
-so cleanup (stop()) always happens, even if code inside the `with` block
-raises. Calling stop() manually is also safe to repeat (idempotent).
+Currently local-only (127.0.0.1); a remote target needs a publicly
+reachable canary instead (public IP/domain, or a service like interactsh)
+behind the same ``url_for``/``wait_for_hit`` interface.
 
-Threading note: this server runs on its own background OS thread
-(ThreadingHTTPServer), independent of any asyncio event loop. A blocking,
-synchronous call elsewhere in the process (e.g. parameter discovery) does
-not prevent this server from receiving and recording canary hits.
+Use as a context manager (``with OOBCanaryServer() as canary:``) so
+``stop()`` always runs; runs on its own background thread, independent of
+any asyncio event loop.
 """
 
 from __future__ import annotations

@@ -1,33 +1,14 @@
 """Multi-cloud storage enumeration scanner (AWS S3 / Azure Blob / GCP).
 
-Given a single candidate name (produced by ``recon/cloud_enum.py``), this probes
-each cloud provider's storage endpoint to decide whether a resource with that
-name exists and whether it is publicly open. The detection signals mirror
-initstring/cloud_enum:
+Given a candidate name from ``recon/cloud_enum.py``, probes each provider's
+storage endpoint (S3, Azure Blob container listing, GCS) to decide whether
+it exists and is publicly open. Existence/openness is reported here; the
+deep ACL/listing/write analysis is left to the dedicated ``s3_bucket``
+scanner, which the orchestrator runs on the hits.
 
-  * **AWS S3**   ``https://{name}.s3.amazonaws.com/`` - 200 = open, 403 =
-                 protected (exists), 404 = none. Existence is reported here; the
-                 deep ACL/listing/write analysis is left to the dedicated
-                 ``s3_bucket`` scanner, which the orchestrator runs on the hits.
-  * **Azure**    ``https://{account}.blob.core.windows.net/`` - the account must
-                 resolve (the shared HttpEngine's DNS-safety step enforces that,
-                 so a non-existent account is simply unreachable). Open blob
-                 *containers* are then found via
-                 ``/{container}/?restype=container&comp=list`` (200 = open).
-  * **GCP**      ``https://storage.googleapis.com/{name}`` - 200 = open, 403 =
-                 protected (exists), 404 = none.
-
-Read-only and safe
-------------------
-Every probe is a ``GET``. Nothing is created, written, or claimed. The scanner
-reports what exists and what is world-readable so it can go in the unified
-report; acting on a finding is the analyst's decision.
-
-Testability
------------
-HTTP access to three different provider hosts is obtained through an injected
-``engine_factory(host) -> HttpEngine`` (each host needs its own scope). Tests
-pass a factory that returns a scripted fake engine, so no network is touched.
+Read-only: every probe is a GET. HTTP access is obtained through an
+injected ``engine_factory(host) -> HttpEngine`` so each provider host gets
+its own scope and tests can supply a scripted fake engine.
 """
 
 from __future__ import annotations

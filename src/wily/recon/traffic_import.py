@@ -1,27 +1,14 @@
-"""Hybrid input: import captured HTTP traffic (Burp Suite XML / HAR).
+"""Import captured HTTP traffic (Burp Suite XML / HAR) as scan input.
 
-The internal :class:`~wily.recon.api_discovery.ApiDiscoveryPipeline` stays the
-default when the user hands Wily a bare URL. This module is the opt-in
-alternative/augmentation: the tester already has a capture of real traffic
-(from Burp Suite's "Save items" XML export, or a browser/DevTools HAR file)
-and wants Wily to scan exactly those endpoints, seeded with the auth tokens
-that were already observed.
+Opt-in alternative to ``api_discovery.py`` for when the tester already has
+a traffic capture and wants Wily to scan exactly those endpoints, seeded
+with the auth tokens already observed. Strictly offline: only parses the
+bytes/text handed to it, and feeds the extracted endpoints/tokens into the
+same scan queue the orchestrator already loops over.
 
-Strictly offline by construction
---------------------------------
-Nothing here fetches or replays anything - it only *parses* bytes/text that
-were handed to it. The endpoints and tokens it extracts are fed into the same
-per-endpoint scan queue the orchestrator already loops over; the active
-scanning (and the scope/SSRF guards) happen there, not here.
-
-What it extracts
-----------------
-  * endpoints  - request URLs (deduplicated, order preserved)
-  * tokens     - ``Authorization`` header values / bearer tokens, with the
-                 subset that look like JWTs surfaced separately so the JWT
-                 module's ``--token`` path can be seeded automatically
-  * s3_links   - ``s3://...`` URIs and ``*.s3*.amazonaws.com`` URLs seen
-                 anywhere in the captured URLs/headers/bodies
+Extracts: deduplicated endpoint URLs; ``Authorization``/bearer tokens
+(JWTs surfaced separately for the JWT module's ``--token`` path); and any
+S3 URIs/URLs seen in the captured data.
 """
 
 from __future__ import annotations

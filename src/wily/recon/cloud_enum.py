@@ -1,17 +1,11 @@
-"""Mutation-based cloud resource name generation (cloud_enum-style).
+"""Mutation-based cloud resource name generation.
 
-Instead of taking a pre-written wordlist *file* of bucket names, Wily builds the
-candidate names itself from one or more keywords (typically the target's own
-name) combined with a list of mutation words. The generated names are then fed
-straight into the cloud-storage scanner (AWS S3 / Azure Blob / GCP), so the
-flow is: keyword -> generated names -> live existence/openness checks, with no
-manual wordlist step.
-
-The generation logic mirrors initstring/cloud_enum's ``build_names``: for each
-cleaned keyword it emits the bare keyword plus, for every mutation word, six
-combined forms using ``.``, ``-`` or no separator, in both orders. This module
-is pure/offline (keyword + mutations in, names out) so it is unit-testable with
-no network, and the scanner that consumes the names enforces scope and safety.
+Builds candidate bucket/storage names from one or more keywords (typically
+the target's own name) combined with mutation words, instead of requiring
+a pre-written wordlist file. For each keyword, emits the bare keyword plus
+six combined forms per mutation word (``.``/``-``/no separator, both
+orders). Pure/offline; the cloud-storage scanner that consumes the
+generated names enforces scope and safety.
 """
 
 from __future__ import annotations

@@ -1,28 +1,15 @@
 """API-keys / secrets exposure scanner.
 
-Frontend bundles, HTTP response bodies and already-captured traffic routinely
-leak long-lived credentials - a hardcoded AWS access key in a minified JS
-bundle, a bearer token in a HAR export, a PEM private key echoed in an error
-page. This scanner searches *text the scan already has* for those secrets.
+Searches text the scan already has (JS bundles, response bodies, imported
+Burp/HAR traffic) for secret shapes (``evidence/sanitize.detect_secrets``):
+hardcoded AWS keys, bearer tokens, PEM private keys, and the like.
 
-Detection only, never use
--------------------------
-The scanner matches secret *shapes* (see ``evidence/sanitize.detect_secrets``)
-and reports them. It never authenticates to any third-party service with a
-found key - a live-looking AWS key is reported, not exercised. The report keeps
-only a short masked indicator of each secret (``mask_secret``), never the raw
-value, so the finding is actionable without re-leaking the credential.
+Detection only: never authenticates with a found key, and the report keeps
+only a masked indicator (``mask_secret``), never the raw value.
 
-Input shape
------------
-The scanner is pure/offline over whatever text it is handed:
-  * ``sources``    - pre-fetched text blobs (imported Burp/HAR traffic, response
-                     bodies the orchestrator already read, observed tokens).
-  * ``fetch_urls`` - in-scope URLs (typically discovered ``*.js`` bundles) whose
-                     body the scanner fetches through the shared HttpEngine and
-                     then scans. Out-of-scope / unreachable URLs are skipped.
-So unit tests can drive it entirely through ``sources`` with no network, exactly
-like the other scanners' fake-HTTP tests.
+Takes pre-fetched text via ``sources`` (fully offline, unit-testable) and/or
+``fetch_urls`` for in-scope URLs it fetches itself through the shared
+HttpEngine.
 """
 
 from __future__ import annotations

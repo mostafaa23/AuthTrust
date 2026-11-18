@@ -1,42 +1,17 @@
-"""API Gateway / Serverless Auth Bypass.
+"""API Gateway / serverless auth-bypass scanner.
 
-Real-world cloud scenario: in AWS API Gateway, every route (path + method)
-is bound to its own Authorizer (Cognito/IAM/Lambda Authorizer), or it can
-be registered with AuthorizationType: NONE. The common failure mode is
-rarely path manipulation like a traditional server - it is *inconsistent*
-Authorizer enforcement across the methods on the same resource, which is
-an easy mistake because each method is configured independently in API
-Gateway.
+In AWS API Gateway each route (path + method) binds its own Authorizer
+independently, so the common bug is inconsistent enforcement rather than
+path manipulation. Checks three patterns:
+  - missing_authorizer: a method returns data with no Authorization header.
+  - authorizer_fail_open: a missing header is rejected but a malformed
+    credential is accepted (Lambda-authorizer fail-open, OWASP API2:2023).
+  - method_inconsistency: one method on a resource is protected, another
+    isn't.
 
-v0.2 - three techniques:
-  1. missing_authorizer   : any method on the route still returns data with
-     no Authorization header at all (expected: 401). A 200 whose body is an
-     auth-error message is treated as a soft-200 denial, not a leak, and -
-     when a valid token is supplied - confidence is grounded by comparing
-     the unauthenticated body to the authenticated baseline.
-  2. authorizer_fail_open : the route correctly rejects a missing header
-     (401/403) but accepts a malformed/garbage credential (200) - the
-     classic Lambda-authorizer fail-open or wildcard-cached-policy bypass
-     (OWASP API2:2023; the authorizer must deny by default on any
-     exception). missing_authorizer cannot see this because "no header" is
-     rejected, so the route looks protected.
-  3. method_inconsistency : one method (e.g. GET) is correctly protected
-     (401 with no auth), but another method on the same resource (e.g.
-     DELETE) is not - a common partial-authorizer-binding mistake in API
-     Gateway.
-
-Both checks are passive (ordinary requests, no forgery or injection) when
-only the default, non-destructive methods are tested. Testing destructive
-methods (POST/PUT/DELETE/PATCH) can mutate or delete real target data, so
-it is opt-in and requires an explicit confirmation (see
-``AuthzBypassTarget.include_destructive_methods`` and
-``AuthzBypassScanner(confirm_destructive=True)``).
-
-TODO (next steps):
-  - CORS misconfiguration (Allow-Origin: * + Allow-Credentials: true) -
-    implemented below as CorsMisconfigScanner.
-  - Stage/deployment inconsistency (/dev/admin unprotected while /prod/admin
-    is protected) - implemented below as StageInconsistencyScanner.
+Passive and non-destructive by default. Testing destructive methods
+(POST/PUT/DELETE/PATCH) can mutate real data, so it requires
+``AuthzBypassScanner(confirm_destructive=True)``.
 """
 
 from __future__ import annotations

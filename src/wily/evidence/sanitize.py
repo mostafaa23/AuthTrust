@@ -1,17 +1,11 @@
 """Redaction of secrets, tokens, cookies and API keys before evidence is
 logged or written to a report.
 
-Only ``sanitize_evidence_dict`` is safe to call on a Finding's evidence
-before it leaves the process (report writers rely on this - see
-``report/json_report.py``). Scanners should still prefer calling
-``sanitize_text``/``sanitize_headers`` directly on anything they capture
-and plan to keep around in memory for longer than one Finding.
+``sanitize_evidence_dict`` is the one safe to call on a Finding's evidence
+before it leaves the process; report writers rely on this.
 
-Note: in scanners/jwt_tamper.py, the evidence *is* the forged token
-(``forged_token``) - that is intentional and not a leaked secret, it is
-the proof of the vulnerability itself. It is exempted by name, not by any
-looser rule, so an unrelated field that happens to contain the substring
-"token" is never silently skipped.
+``jwt_tamper.py``'s ``forged_token`` field is exempted by name: it is the
+proof of the vulnerability itself, not a leaked secret.
 """
 
 from __future__ import annotations
