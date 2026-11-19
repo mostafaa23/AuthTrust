@@ -33,7 +33,9 @@ also exposes several of them as focused standalone subcommands:
 7. **Cloud storage enumeration** — `cloud_enum`-style AWS S3 / Azure Blob /
    GCP bucket name generation and probing, with automatic hand-off of live
    S3 buckets to the deep bucket-misconfiguration scan.
-8. **Reporting & ranking** — a light-ML de-duplication/risk-ranking layer and
+8. **Triage, ranking & reporting** — endpoint-aware de-duplication, contextual
+   risk scoring driven by the actual evidence, a sensitivity scorer that tells
+   a real leak from a public catalog response, an analyst feedback loop, and
    unified JSON, HTML and SARIF report writers.
 
 ## Install
@@ -95,9 +97,54 @@ wily authz <url>                     # API Auth Bypass only
 wily iam authorization-details.json  # IAM privilege-escalation only
 wily ssrf <url> --param url          # IMDS cloud SSRF only
 wily discover <domain>               # Endpoint discovery only, no scanning
+wily triage report.json --list       # Review/record verdicts on a past report
 ```
 
 Run `wily <command> -h` for the full set of options on any subcommand.
+
+## Triage: cutting false positives
+
+The weakest part of any black-box scanner is not finding things — it is being
+wrong about them. Wily pushes back on that in four places, and every
+adjustment it makes is written into the report as a reason, never applied
+silently:
+
+- **Differential baselines.** A candidate "leak" is compared against what the
+  target returns for an authorized request, for a denied one, and for a
+  resource that does not exist. A `200 OK` whose body matches the generic
+  catch-all page is dropped instead of reported (`wily authz --soft-404-url`).
+- **Evidence-based risk.** Severity boosts come from what was actually
+  observed — a live cloud credential outranks a generic token-shaped string,
+  and a BOLA hit on an object confirmed to belong to another tenant outranks a
+  seeded guess — rather than from a fixed per-category number.
+- **Sensitivity scoring.** Responses are scored for whether they carry real
+  sensitive material (cloud keys, JWTs, account-shaped records) or just look
+  like a public listing.
+- **Endpoint-aware de-duplication.** `/invoices/1` … `/invoices/100` collapse
+  into one finding on `/invoices/{id}`, while genuine version prefixes
+  (`/v1/`, `/v2/`) are left alone.
+
+### Feedback loop
+
+Your verdicts are worth keeping. `wily triage` records them against a stable
+hash of each finding, so a decision survives a re-scan even when the object id
+in the URL changes:
+
+```bash
+# Review the findings in a report, with any verdict you recorded earlier
+wily triage wily-report.json --list
+
+# Mark row 2 as a real finding and row 5 as a false positive
+wily triage wily-report.json --valid 2 --fp 5 --note "confirmed in staging"
+
+# Carry those verdicts into the next scan's report
+wily scan example.com -o report.json --feedback-store wily-feedback.jsonl
+```
+
+Decisions append to a local JSONL log (`wily-feedback.jsonl` by default).
+Nothing is uploaded anywhere, and no model is trained today — the log is the
+labeled data a trained classifier would need, which is why it is worth
+collecting from the first scan.
 
 ## Safety
 

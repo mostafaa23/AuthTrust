@@ -39,13 +39,26 @@ def run(
             "read methods only."
         ),
     ),
+    soft_404_url: str = typer.Option(
+        None, "--soft-404-url",
+        help=(
+            "A URL on the same host known NOT to resolve to a real resource "
+            "(e.g. the same path with a random id). Candidate leaks whose body "
+            "matches this baseline are dropped as generic catch-all pages "
+            "rather than reported."
+        ),
+    ),
     output: str = typer.Option("wily-authz-report.json", "-o", "--output", help="Path to write the report to."),
 ) -> None:
     """Checks for missing-authorizer, method-inconsistency, and CORS misconfiguration."""
     console.print(f"[cyan][*][/cyan] Scanning [bold]{url}[/bold] (Auth Bypass)...")
 
     findings: list = []
-    target = AuthzBypassTarget(url=url, include_destructive_methods=confirm_destructive)
+    target = AuthzBypassTarget(
+        url=url,
+        include_destructive_methods=confirm_destructive,
+        soft_404_probe_url=soft_404_url,
+    )
     root_host = urlparse(url).hostname
     scope = ScopeManager(root_host, allow_local_targets=allow_local)
 
