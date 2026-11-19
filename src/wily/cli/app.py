@@ -17,6 +17,7 @@ command is available directly in any terminal as `wily`:
     wily ssrf <url> --param url
     wily iam <authorization-details.json>
     wily discover <domain>
+    wily triage <report.json> --valid 2 --fp 5   # feedback loop
 """
 
 import asyncio
@@ -26,7 +27,7 @@ import typer
 
 from wily import __version__
 from wily.cli.banner import print_banner
-from wily.cli.commands import authz_cmd, discover_cmd, iam_cmd, jwt_cmd, scan_all, ssrf_cmd
+from wily.cli.commands import authz_cmd, discover_cmd, iam_cmd, jwt_cmd, scan_all, ssrf_cmd, triage_cmd
 
 logger = logging.getLogger("wily.cli")
 
@@ -164,6 +165,15 @@ def scan_command(
         None, "--scope-config",
         help="JSON/YAML file with 'buckets', 'accounts' and 'exclude' scope lists.",
     ),
+    feedback_store: str = typer.Option(
+        None, "--feedback-store",
+        help=(
+            "Path to a local JSONL feedback log (see `wily triage`). If given, "
+            "findings whose hash matches a prior --valid/--fp decision are "
+            "annotated with evidence['feedback_verdict'] - informational only, "
+            "never drops or reorders a finding."
+        ),
+    ),
 ) -> None:
     """The full bundle, automatically (Discovery + Auth Bypass + CORS + SSRF)
     against any domain, enabling JWT/BOLA/IAM based on the inputs you provide."""
@@ -198,6 +208,7 @@ def scan_command(
             scope_buckets=scope_bucket or [],
             scope_accounts=scope_account or [],
             scope_config=scope_config,
+            feedback_store=feedback_store,
         )
     )
 
@@ -207,6 +218,7 @@ app.command("authz", help="API Auth Bypass checks only.")(authz_cmd.run)
 app.command("iam", help="IAM Privilege Escalation analysis only.")(iam_cmd.run)
 app.command("ssrf", help="IMDS Cloud SSRF checks only.")(ssrf_cmd.run)
 app.command("discover", help="Discover real endpoints (OpenAPI/JS/wordlist) only, with no scanning.")(discover_cmd.run)
+app.command("triage", help="Record --valid/--fp analyst decisions against a prior scan report (feedback loop).")(triage_cmd.run)
 
 
 def _version_callback(value: bool) -> None:

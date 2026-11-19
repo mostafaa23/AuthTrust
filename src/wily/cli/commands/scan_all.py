@@ -56,7 +56,8 @@ from wily.scanners.secret_scan import (
     SecretSource,
 )
 from wily.scanners.takeover import TakeoverScanner, TakeoverTarget
-from wily.risk.ml.dedup import deduplicate
+from wily.risk.ml.dedup import cluster_by_endpoint_hash, deduplicate
+from wily.risk.ml.feedback import FeedbackStore
 from wily.risk.ml.ranker import rank_findings
 from wily.risk.rules_engine import apply_deterministic_rules
 from wily.risk.scoring import compute_risk_score
@@ -106,6 +107,7 @@ async def run_full_scan(
     scope_buckets: list[str] | None = None,
     scope_accounts: list[str] | None = None,
     scope_config: str | None = None,
+    feedback_store: str | None = None,
 ) -> None:
     all_findings: list = []
 
@@ -178,7 +180,7 @@ async def run_full_scan(
             )
 
     if not domain:
-        _finish(all_findings, output, show_leak, report_formats)
+        _finish(all_findings, output, show_leak, report_formats, feedback_store)
         return
 
     if domain.startswith("http"):
@@ -318,7 +320,7 @@ async def run_full_scan(
     if not endpoints:
         if not all_findings:
             console.print("[yellow][-][/yellow] No endpoints found, stopping here.")
-        _finish(all_findings, output, show_leak, report_formats)
+        _finish(all_findings, output, show_leak, report_formats, feedback_store)
         return
 
     canary = OOBCanaryServer() if blind else None
@@ -465,7 +467,7 @@ async def run_full_scan(
                 # surface it as a justified next step for the analyst.
                 console.print(f"[cyan]    [>][/cyan] recommend {fu.scanner} on {fu.asset} — {fu.reason}")
 
-    _finish(all_findings, output, show_leak, report_formats)
+    _finish(all_findings, output, show_leak, report_formats, feedback_store)
 
 
 _BARE_BUCKET_RE = re.compile(r"[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]")
@@ -873,16 +875,25 @@ def _finish(
     output: str,
     show_leak: bool = False,
     report_formats: list[str] | None = None,
+    feedback_store: str | None = None,
 ) -> None:
     # Correlation/dedup pass before anything is displayed or written, so the
     # console summary and the report agree and neither shows the same issue
-    # twice. Three light passes, in order:
+    # twice. In order:
     #   1. exact-duplicate collapse (deterministic rules),
-    #   2. near-duplicate clustering (risk/ml/dedup), then
-    #   3. ranking/prioritisation (risk/ml/ranker) - the single source of the
+    #   2. near-duplicate clustering on the SAME asset (risk/ml/dedup.deduplicate),
+    #   3. endpoint-hash clustering across DIFFERENT assets that normalize to
+    #      the same shape (risk/ml/dedup.cluster_by_endpoint_hash),
+    #   4. annotate with any prior analyst --valid/--fp decision, if a
+    #      feedback store was given (risk/ml/feedback - opt-in, informational
+    #      only: it never drops or reorders a finding), then
+    #   5. ranking/prioritisation (risk/ml/ranker) - the single source of the
     #      order the table and the JSON report both use.
     findings = apply_deterministic_rules(findings)
     findings = deduplicate(findings)
+    findings = cluster_by_endpoint_hash(findings)
+    if feedback_store:
+        findings = FeedbackStore(feedback_store).apply(findings)
     findings = rank_findings(findings)
 
     console.print(f"\n[green][+][/green] Total findings: {len(findings)}\n")

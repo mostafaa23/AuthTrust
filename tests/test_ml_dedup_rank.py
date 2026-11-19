@@ -157,3 +157,39 @@ def test_bola_without_grounding_evidence_defaults_to_weakest_boost():
     )
     no_grounding = _finding("https://x/none", "bola-cross-tenant", 0.8, severity="high")
     assert priority_score(no_grounding) == priority_score(unowned)
+
+
+# --- contextual risk scoring (heuristic sensitivity scorer) -----------------
+
+
+def test_sensitivity_scorer_raises_priority_when_evidence_has_strong_signal():
+    plain = _finding(
+        "https://x/a", "cors-weak", 0.8, severity="high",
+        evidence={"snippet": "nothing interesting here"},
+    )
+    strong = _finding(
+        "https://x/b", "cors-weak", 0.8, severity="high",
+        evidence={"snippet": "leaked: AKIAABCDEFGHIJKLMNOP in the response"},
+    )
+    assert priority_score(strong) > priority_score(plain)
+
+
+def test_sensitivity_scorer_lowers_priority_for_catalog_shaped_evidence():
+    plain = _finding("https://x/a", "cors-weak", 0.8, severity="high")
+    catalog = _finding(
+        "https://x/b", "cors-weak", 0.8, severity="high",
+        evidence={"snippet": (
+            '{"sku": "ABC-123", "price": 19.99, "in_stock": true, '
+            '"category": "shoes", "title": "Running shoes"}'
+        )},
+    )
+    assert priority_score(catalog) < priority_score(plain)
+
+
+def test_sensitivity_reason_recorded_when_present():
+    f = _finding(
+        "https://x/a", "cors-weak", 0.8, severity="high",
+        evidence={"snippet": "leaked: AKIAABCDEFGHIJKLMNOP in the response"},
+    )
+    out = rank_findings([f])
+    assert any("aws" in r.lower() for r in out[0].evidence["rank_reasons"])

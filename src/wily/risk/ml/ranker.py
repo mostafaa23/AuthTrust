@@ -17,6 +17,7 @@ context instead of treating every finding in the category the same.
 
 from __future__ import annotations
 
+from wily.risk.ml.sensitivity import score_response
 from wily.risk.scoring import compute_risk_score
 
 # Category-prefix -> impact boost. Matched by ``str.startswith`` so a family
@@ -79,6 +80,31 @@ def _corroboration_boost(evidence: dict) -> tuple[float, str | None]:
     return 0.0, None
 
 
+# Evidence keys, in preference order, that might hold response text worth
+# running the heuristic sensitivity scorer on. Different scanners name their
+# captured snippet differently; this tries each until one is a usable string.
+_SENSITIVITY_TEXT_KEYS = ("context", "snippet", "body_snippet", "masked_secret")
+
+
+def _sensitivity_boost(evidence: dict) -> tuple[float, str | None]:
+    """risk/ml/sensitivity.py's heuristic adjustment, if the finding's
+    evidence happens to carry response text to score. Most findings don't
+    (Wily avoids storing raw response bodies - see evidence/sanitize.py), in
+    which case this is a no-op, not a penalty."""
+    text = None
+    for key in _SENSITIVITY_TEXT_KEYS:
+        value = evidence.get(key)
+        if isinstance(value, str) and value:
+            text = value
+            break
+    if text is None:
+        return 0.0, None
+    boost, reason = score_response(text)
+    if reason is None:
+        return 0.0, None
+    return boost, f"{boost:+.2f} {reason}"
+
+
 def priority_score(finding) -> float:
     """The heuristic priority used to order a finding: base risk + boosts.
 
@@ -94,7 +120,8 @@ def priority_score(finding) -> float:
 
     impact, _ = _impact_boost(category, evidence)
     corroboration, _ = _corroboration_boost(evidence)
-    return round(base + impact + corroboration, 2)
+    sensitivity, _ = _sensitivity_boost(evidence)
+    return round(base + impact + corroboration + sensitivity, 2)
 
 
 def rank_findings(findings: list) -> list:
@@ -117,13 +144,16 @@ def rank_findings(findings: list) -> list:
 
         impact, impact_reason = _impact_boost(category, evidence or {})
         corroboration, corr_reason = _corroboration_boost(evidence or {})
-        priority = round(base + impact + corroboration, 2)
+        sensitivity, sensitivity_reason = _sensitivity_boost(evidence or {})
+        priority = round(base + impact + corroboration + sensitivity, 2)
 
         reasons = [f"base risk {base}"]
         if impact_reason:
             reasons.append(impact_reason)
         if corr_reason:
             reasons.append(corr_reason)
+        if sensitivity_reason:
+            reasons.append(sensitivity_reason)
 
         # Record the ranking rationale on the finding (non-destructively) so the
         # exported report can show why it placed where it did.
